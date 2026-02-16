@@ -1,0 +1,1174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Local RSS</title>
+  <style>
+[hidden]{display:none !important;}
+
+
+:root{
+  --app-bg:#f5f6f8;
+  --panel-bg:#ffffff;
+  --panel-border:#d7dde8;
+  --text:#111827;
+  --muted:#4b5563;
+  --muted2:#6b7280;
+  --shadow: 0 8px 24px rgba(17,24,39,0.08);
+  --shadow-sm: 0 2px 10px rgba(17,24,39,0.08);
+  --radius: 14px;
+  --radius-sm: 10px;
+  --accent:#2563eb;
+  --accent-2:#1d4ed8;
+  --danger:#b91c1c;
+  --danger-2:#991b1b;
+}
+
+*{ box-sizing:border-box; }
+
+html, body { height:100%; }
+
+body{
+  margin:0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif;
+  color: var(--text);
+  background: var(--app-bg);
+}
+
+    #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
+    #status { color:#555; min-width: 260px; }
+    .item { padding: 8px; border-bottom: 1px solid #ddd; }
+    .item.selected { outline: 2px solid #999; }
+    .title { cursor: pointer; }
+    .meta { color:#666; font-size: 12px; display:flex; gap:10px; align-items:center; }
+    .content { margin-top: 8px; display:none; }
+    .content.expanded { display:block; }
+    .star { cursor:pointer; margin-left:8px; user-select:none; }
+    .pill { font-size:12px; padding:2px 6px; border:1px solid #ccc; border-radius:999px; color:#444; }
+    .danger { border-color: #cc6666; }
+    .collapseBtn { font-size: 12px; padding: 2px 6px; }
+    progress { width: 280px; height: 14px; }
+  
+    
+    /* Images inside feed entries: responsive + max 500px width */
+    .content img {
+      max-width: min(500px, 100%);
+      height: auto;
+      display: block;
+      cursor: zoom-in;
+    }
+
+    /* Shell layout */
+    body { margin: 0; }
+
+    /* Ensure toolbar looks good in sidebar */
+    #toolbar { margin-bottom: 10px; }
+
+    /* ===== Two-pane layout (overlay sidebar) ===== */
+    body { margin: 0; }
+    #hamburger {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 3001;
+      font-size: 18px;
+      line-height: 18px;
+      padding: 8px 10px;
+      border: 1px solid #bbb;
+      border-radius: 10px;
+      background: #fff;
+      cursor: pointer;
+    }
+    #backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 2500;
+      
+    }
+    #sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 100vh;
+      font-size: 12px;
+      width: min(400px, 100vw);
+      box-sizing: border-box;
+      padding: 0;
+overflow: auto;
+      background: #fff;
+      border-right: 1px solid #ddd;
+      z-index: 3000;
+      transform: translateX(-100%);
+      transition: transform 160ms ease;
+    }
+
+    .sidebar-inner{
+      box-sizing:border-box;
+      padding: 56px 12px 12px 12px; /* leave space for hamburger */
+    }
+    .sidebar-section{
+      margin-bottom: 18px;
+    }
+    .hint{ font-size:12px; color:#666; margin-top:6px; }
+    .label{ display:block; font-size:12px; color:#444; margin-bottom:4px; }
+    .row{ margin-bottom:10px; }
+
+    .sidebar-title{
+      font-size: 13px;
+      font-weight: 700;
+      margin: 0 0 10px 0;
+    }
+    .io-row{
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 10px;
+      align-items: center;
+      margin: 8px 0;
+    }
+    .io-label{
+      font-size: 13px;
+      color: #444;
+    }
+    .io-actions{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .sidebar-sep{
+      border: 0;
+      border-top: 1px solid #ddd;
+      margin: 14px 0;
+    }
+    .sidebar-footer{ margin-top:12px; padding:10px 12px; font-size:12px; color:#555; border-top:1px solid var(--panel-border); }
+    #mainPane {
+      width: 100vw;
+      height: 100vh;
+      overflow: auto;
+      box-sizing: border-box;
+      padding: 12px;
+      padding-top: 56px; /* space for hamburger */
+    }
+    body.sidebar-open #sidebar { transform: translateX(0); }
+/* Toolbar layout inside sidebar */
+    #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
+
+
+    #topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+    #status2 { color:#555; }
+
+
+button, input, select, textarea {
+  font: inherit;
+}
+
+
+
+/* Sidebar polish */
+#sidebar{
+  background: rgba(255,255,255,0.96);
+  backdrop-filter: blur(8px);
+  border-right: 1px solid var(--panel-border);
+}
+
+.sidebar-inner{
+  padding: 56px 14px 14px 14px; /* keep hamburger clear */
+}
+
+.sidebar-section{
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 14px;
+}
+
+.sidebar-title{
+  font-size: 12px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px 0;
+}
+
+.label{
+  color: var(--muted);
+}
+
+.hint{ color: var(--muted2); }
+
+#sidebar input[type="text"],
+#sidebar input[type="file"],
+#sidebar select,
+#sidebar textarea{
+  width: 100%;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: #fff;
+}
+
+#sidebar button{
+  font-size: 10pt;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: #fff;
+  box-shadow: 0 1px 0 rgba(17,24,39,0.04);
+  cursor: pointer;
+}
+
+#sidebar button:hover{ background: #f8fafc; }
+
+#sidebar button:disabled{
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+#sidebar button.primary{
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  color: #fff;
+  border-color: rgba(37,99,235,0.8);
+}
+
+#sidebar button.primary:hover{
+  filter: brightness(0.98);
+}
+
+#sidebar button.danger{
+  background: linear-gradient(180deg, var(--danger), var(--danger-2));
+  color: #fff;
+  border-color: rgba(185,28,28,0.85);
+}
+
+#sidebar button.danger:hover{ filter: brightness(0.98); }
+
+/* Main pane polish */
+#mainPane{
+  background: var(--app-bg);
+}
+
+#topbar{
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.pill{
+  background:#eef2ff;
+  border: 1px solid rgba(37,99,235,0.25);
+  border-radius: 999px;
+}
+
+/* Entry cards */
+.item{
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  margin: 10px 0;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.item.selected{
+  outline: 2px solid rgba(37,99,235,0.35);
+  outline-offset: 2px;
+}
+
+.title{
+  font-weight: 650;
+}
+
+.meta{
+  color: var(--muted2);
+}
+
+</style>
+</head>
+
+<body>
+  <button id="hamburger" class="hamburger" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" title="Menu">☰</button>
+  <div id="backdrop" class="sidebar-backdrop" aria-hidden="true" hidden></div>
+
+  <aside id="sidebar" class="sidebar" aria-hidden="true" aria-label="Options">
+    <div class="sidebar-inner">
+<div class="sidebar-section">
+  <h2 class="sidebar-title">Database</h2>
+  <div class="row">
+    <label for="dbSelect" class="label">Current</label>
+    <select id="dbSelect"></select>
+  </div>
+  <div id="dbSelectStatus" class="hint"></div>
+</div>
+<hr class="sidebar-sep"/>
+
+      <div class="sidebar-section">
+        <h2 class="sidebar-title">Update</h2>
+
+        <div id="toolbar">
+          <button id="updateStart" class="primary">Update now</button>
+          <button id="updateCancel" class="danger" hidden disabled>cancel Update</button>
+
+          <label class="pill"><input type="checkbox" id="schedulerToggle"/> Background updating</label>
+          <label><input type="checkbox" id="bookmarkedOnly"/> Only bookmarked</label>
+
+          <progress id="prog" value="0" max="1" style="display:none;"></progress>
+          <span class="pill" id="counts">…</span>
+          <span id="status"></span>
+        </div>
+      </div>
+
+      <hr class="sidebar-sep"/>
+
+      <div class="sidebar-section" id="feedsSection">
+        <h2 class="sidebar-title">Feeds</h2>
+
+        <div class="row">
+          <label class="label" for="newFeedUrl">Create new feed</label>
+          <input id="newFeedUrl" type="url" placeholder="RSS/Atom URL or website URL" />
+          <div class="io-actions">
+            <button id="createFeedBtn" class="primary">Create / Discover</button>
+            <span class="pill" id="createFeedStatus" aria-live="polite"></span>
+          </div>
+          <div class="hint">If you paste a website URL, the reader will look for an RSS/Atom link in the page header.</div>
+        </div>
+
+        <div class="row">
+          <label class="label" for="feedSearch">Find / update feed</label>
+          <input id="feedSearch" type="text" placeholder="Search feeds by title or URL" />
+          <div id="feedResults" class="hint"></div>
+        </div>
+
+        <div id="feedEditor" hidden>
+          <hr class="sidebar-sep"/>
+          <h3 class="sidebar-title" style="margin-top:0;">Edit feed</h3>
+          <input id="editFeedId" type="hidden" />
+
+          <div class="row">
+            <label class="label" for="editFeedUrl">Feed URL</label>
+            <input id="editFeedUrl" type="url" />
+          </div>
+
+          <div class="row">
+            <label class="label" for="editFeedTitle">Title</label>
+            <input id="editFeedTitle" type="text" />
+          </div>
+
+          <div class="io-actions">
+            <button id="saveFeedBtn" class="primary">Save</button>
+            <button id="deleteFeedBtn" class="danger">Delete…</button>
+            <span class="pill" id="feedEditorStatus" aria-live="polite"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h2 class="sidebar-title">Import / Export</h2>
+
+        <div class="io-row">
+          <label class="io-label" for="opmlFile">Import OPML</label>
+          <input type="file" id="opmlFile" accept=".opml,.xml,text/xml,application/xml" />
+        </div>
+
+        <div class="io-row">
+          <label class="io-label" for="opmlMode">Import mode</label>
+          <select id="opmlMode">
+            <option value="merge" selected>Add to existing (no duplicates)</option>
+            <option value="replace">Replace existing feed list</option>
+            <option value="newdb">Create new database</option>
+          </select>
+        </div>
+
+        <div class="io-row" id="newDbRow" hidden>
+          <label class="io-label" for="newDbName">New DB name</label>
+          <input type="text" id="newDbName" placeholder="e.g., rss_new.db" />
+        </div>
+
+        <div class="io-actions">
+          <button id="opmlImportBtn" class="primary">Import</button>
+          <span class="pill" id="opmlImportStatus" aria-live="polite"></span>
+        </div>
+
+        <hr class="sidebar-sep"/>
+
+        <div class="io-actions">
+          <button id="opmlExportBtn" class="primary">Export OPML</button>
+          <span class="pill" id="opmlExportStatus" aria-live="polite"></span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main id="mainPane" class="main" aria-label="Entries">
+    <div id="topbar">
+      <span class="pill" id="dbpath">DB: …</span>
+      <span class="pill" id="counts2">…</span>
+      <span id="status2"></span>
+    </div>
+    <div id="list"></div>
+  </main>
+
+  <script>
+
+let items = [];
+let selected = 0;
+let expandedId = null;
+
+let jobId = null;
+let progressTimer = null;
+
+// Sidebar: start collapsed; hamburger toggles open/closed.
+// ===== Sidebar overlay (single-source-of-truth: body.sidebar-open) =====
+function initSidebar() {
+  const body = document.body;
+  const btn = document.getElementById("hamburger");
+  const sidebar = document.getElementById("sidebar");
+  const backdrop = document.getElementById("backdrop");
+  if (!btn || !sidebar || !backdrop) return;
+
+  function setOpen(open) {
+    body.classList.toggle("sidebar-open", open);
+    backdrop.hidden = !open;
+
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    sidebar.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+
+  function isOpen() {
+    return body.classList.contains("sidebar-open");
+  }
+
+  // Start closed (requirement)
+  setOpen(false);
+
+  btn.addEventListener("click", () => setOpen(!isOpen()));
+  backdrop.addEventListener("click", () => setOpen(false));
+
+  // ESC closes (simple + robust)
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && isOpen()) setOpen(false);
+  });
+}
+
+async function initDbSelector() {
+  const sel = document.getElementById("dbSelect");
+  const status = document.getElementById("dbSelectStatus");
+  if (!sel) return;
+
+  async function refresh() {
+    try {
+      const r = await fetch("/api/db_list");
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || "db_list failed");
+      const { dbs, current } = j;
+
+      sel.innerHTML = "";
+      (dbs || []).forEach(name => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      });
+
+      if (current) sel.value = current;
+      if (status) status.textContent = "";
+    } catch (e) {
+      console.error("db selector refresh failed", e);
+      if (status) status.textContent = "Could not load database list.";
+    }
+  }
+
+  sel.addEventListener("change", async () => {
+    const chosen = sel.value;
+    if (!chosen) return;
+    if (status) status.textContent = "Switching…";
+    try {
+      const r = await fetch("/api/db_select", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({db: chosen})
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || "db_select failed");
+      if (status) status.textContent = "";
+      // Reload the main list & counts against the new DB
+      await loadItems();
+      await loadCounts();
+    } catch (e) {
+      console.error("db switch failed", e);
+      if (status) status.textContent = (e && e.message) ? e.message : "Switch failed.";
+      // Re-sync selector to actual current
+      await refresh();
+    }
+  });
+
+  await refresh();
+}
+
+function fmtDate(ts){
+  const d = new Date(ts*1000);
+  return d.toLocaleString();
+}
+
+async function loadCounts(){
+  const r = await fetch("/api/stats");
+  const s = await r.json();
+  const c = `feeds=${s.feeds}  unread=${s.unread}  bookmarked=${s.bookmarked}  retention=${s.retention_days}d`;
+  const c1 = document.querySelector("#counts"); if (c1) c1.textContent = c;
+  const c2 = document.querySelector("#counts2"); if (c2) c2.textContent = c;
+  document.querySelector("#schedulerToggle").checked = !!s.scheduler_enabled;
+}
+
+async function loadItems(){
+  const bookmarked = document.querySelector("#bookmarkedOnly").checked ? 1 : 0;
+  const r = await fetch(`/api/items?bookmarked=${bookmarked}&limit=1600`);
+  items = await r.json();
+
+  // reset state + caches
+  selected = 0;
+  expandedId = null;
+  rowEls = [];
+  contentElsById = new Map();
+  titleElsById = new Map();
+  starElsById = new Map();
+  collapseElsById = new Map();
+  itemById = new Map();
+  for (const it of items) itemById.set(it.id, it);
+
+  renderInitial();
+  await loadCounts();
+  updateSelectionUI(null, selected);
+}
+
+function renderInitial(){
+  const list = document.querySelector("#list");
+  list.innerHTML = "";
+
+  const frag = document.createDocumentFragment();
+
+  items.forEach((it, idx) => {
+    const div = document.createElement("div");
+    div.className = "item";
+    div.dataset.idx = String(idx);
+    div.dataset.id = String(it.id);
+
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = `${it.feed_title}: ${it.title}`;
+    const collapseBtn = document.createElement("button");
+    collapseBtn.textContent = "Collapse";
+    collapseBtn.className = "collapseBtn";
+    collapseBtn.style.marginLeft = "10px";
+    collapseBtn.style.display = "none";
+    collapseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      collapseEntry();
+    });
+    title.appendChild(collapseBtn);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${fmtDate(it.published)}  · feed/month=${it.month_count}`;
+
+    const star = document.createElement("span");
+    star.className = "star";
+    star.textContent = it.bookmarked ? "★" : "☆";
+    star.title = "Bookmark (or press B)";
+    meta.appendChild(star);
+
+    const content = document.createElement("div");
+    content.className = "content";
+    // IMPORTANT: do NOT set innerHTML yet (huge performance win)
+    // We'll inject content only when expanded.
+
+    div.appendChild(title);
+    div.appendChild(meta);
+    div.appendChild(content);
+
+    // Click handlers (delegated per-row)
+    div.addEventListener("click", (e) => {
+      const clickedStar = e.target === star;
+      if (clickedStar) return; // star has its own handler
+      setSelected(idx);
+    });
+
+    title.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onTitleClick(it);
+    });
+
+    star.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await toggleBookmark(it.id);
+    });
+
+    rowEls[idx] = div;
+    contentElsById.set(it.id, content);
+    titleElsById.set(it.id, title);
+    starElsById.set(it.id, star);
+    collapseElsById.set(it.id, collapseBtn);
+
+    frag.appendChild(div);
+  });
+
+  list.appendChild(frag);
+}
+
+function setSelected(idx){
+  const prev = selected;
+  selected = Math.max(0, Math.min(items.length-1, idx));
+  updateSelectionUI(prev, selected);
+}
+
+function updateSelectionUI(prevIdx, newIdx){
+  if (prevIdx !== null && rowEls[prevIdx]) rowEls[prevIdx].classList.remove("selected");
+  if (rowEls[newIdx]) {
+    rowEls[newIdx].classList.add("selected");
+    rowEls[newIdx].scrollIntoView({block:"nearest"});
+  }
+}
+
+function move(delta){
+  if (!items.length) return;
+  setSelected(selected + delta);
+}
+
+// Expand/collapse helpers without re-rendering whole list
+function collapseExpanded(){
+  if (expandedId === null) return;
+  const content = contentElsById.get(expandedId);
+  if (content) content.classList.remove("expanded");
+  const cbtn = collapseElsById.get(expandedId);
+  if (cbtn) cbtn.style.display = "none";
+  expandedId = null;
+}
+
+function collapseEntry(){
+  collapseExpanded();
+}
+
+function expandEntry(entryId, scrollTop=false){
+  // collapse previous
+  if (expandedId !== null && expandedId !== entryId) collapseExpanded();
+
+  const it = itemById.get(entryId);
+  const content = contentElsById.get(entryId);
+  if (!it || !content) return;
+
+  expandedId = entryId;
+
+  const cbtn = collapseElsById.get(entryId);
+  if (cbtn) cbtn.style.display = "inline-block";
+
+  // Inject HTML only once
+  if (!content.dataset.filled) {
+    content.innerHTML = it.content_html || "<em>(no content)</em>";
+    content.dataset.filled = "1";
+  }
+
+  content.classList.add("expanded");
+
+  if (scrollTop) {
+    const row = rowEls[selected];
+    if (row) row.scrollIntoView({block:"start"});
+  }
+
+  // Mark read in background (do not block UI)
+  fetch("/api/mark_read", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({id: entryId})
+  }).then(() => loadCounts()).catch(() => {});
+}
+
+function onTitleClick(it){
+  if (expandedId === it.id) {
+    if (it.link) window.open(it.link, "_blank");
+    return;
+  }
+  // Expand immediately
+  expandEntry(it.id);
+}
+
+// Bookmark toggle updates only that star (no full render)
+async function toggleBookmark(entryId){
+  const r = await fetch("/api/toggle_bookmark", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({id: entryId})
+  });
+  const j = await r.json();
+  const it = itemById.get(entryId);
+  if (it) it.bookmarked = j.bookmarked ? 1 : 0;
+  const star = starElsById.get(entryId);
+  if (star) star.textContent = (j.bookmarked ? "★" : "☆");
+  await loadCounts();
+}
+
+document.addEventListener("keydown", (e) => {
+  // Disable entry-list keyboard shortcuts when the sidebar/options pane is open,
+  // or when the user is typing in a form field.
+  if (document.body.classList.contains("sidebar-open")) return;
+
+  const ae = document.activeElement;
+  if (ae) {
+    const tag = (ae.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button" || ae.isContentEditable) {
+      return;
+    }
+  }
+
+  if (e.key === "j" || e.key === "J") {
+    move(1);
+    const it = items[selected];
+    if (it) expandEntry(it.id, true);
+    e.preventDefault();
+    return;
+  }
+  if (e.key === "k" || e.key === "K") {
+    move(-1);
+    const it = items[selected];
+    if (it) expandEntry(it.id, true);
+    e.preventDefault();
+    return;
+  }
+  if (e.key === "Enter") {
+    const it = items[selected];
+    if (it) onTitleClick(it);
+    e.preventDefault();
+    return;
+  }
+  if (e.key === "b" || e.key === "B") {
+    // Bookmark applies only to the currently expanded (selected) entry.
+    if (expandedId !== null) {
+      toggleBookmark(expandedId);
+      e.preventDefault();
+    }
+    return;
+  }
+});
+
+
+
+// Click-to-zoom for images inside feed content: open the image URL in a new tab.
+// Uses currentSrc when available (handles srcset), otherwise src.
+document.querySelector("#list").addEventListener("click", (e) => {
+  const img = e.target && e.target.closest && e.target.closest(".content img");
+  if (!img) return;
+
+  // Only when the image is inside an expanded entry (so list navigation still works)
+  const contentDiv = img.closest(".content");
+  if (!contentDiv || !contentDiv.classList.contains("expanded")) return;
+
+  const url = (img.currentSrc || img.getAttribute("src") || "").trim();
+  if (!url) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    window.open(new URL(url, window.location.href).toString(), "_blank");
+  } catch {
+    window.open(url, "_blank");
+  }
+}, true);
+
+// Open ALL links from feed content in a new tab (internal + external)
+document.querySelector("#list").addEventListener("click", (e) => {
+  const a = e.target.closest && e.target.closest("a");
+  if (!a) return;
+  const href = a.getAttribute("href");
+  if (!href) return;
+
+  e.preventDefault();
+  try {
+    window.open(new URL(href, window.location.href).toString(), "_blank");
+  } catch {
+    window.open(href, "_blank");
+  }
+}, true);
+
+function setProgressUI(active, checked=0, total=1, updated=0, errors=0, current_url=null, state=null){
+  const prog = document.querySelector("#prog");
+  const cancelBtn = document.querySelector("#updateCancel");
+
+  if (!active) {
+    prog.style.display = "none";
+    prog.value = 0;
+    prog.max = 1;
+    cancelBtn.hidden = true;
+    cancelBtn.disabled = true;
+    return;
+  }
+
+  const running = (state === "running" || !state);
+  cancelBtn.hidden = !running;          // only show while a manual update is running
+  cancelBtn.disabled = !running;
+
+  prog.style.display = "inline-block";
+  prog.max = Math.max(1, total || 1);
+  prog.value = Math.min(checked || 0, prog.max);
+
+  const urlPart = current_url ? ` — ${current_url}` : "";
+  const statePart = state ? `${state}` : "running";
+  const s1 = document.querySelector("#status");
+  const s2 = document.querySelector("#status2");
+  if (s1) s1.textContent =
+    `${statePart}: checked ${checked}/${total} (updated=${updated}, errors=${errors})${urlPart}`;
+  if (s2) s2.textContent = (s1 ? s1.textContent : "");
+}
+
+async function pollProgress(){
+  if (!jobId) return;
+  const r = await fetch(`/api/update_progress?job_id=${encodeURIComponent(jobId)}`);
+  const j = await r.json();
+  if (!j.ok) {
+    setProgressUI(false);
+    const s1 = document.querySelector("#status");
+  const s2 = document.querySelector("#status2");
+  if (s1) s1.textContent = "No job running.";
+    stopPolling();
+    return;
+  }
+  const job = j.job;
+  const state = job.state;
+
+  setProgressUI(true, job.checked, job.total, job.updated, job.errors, job.current_url, state);
+
+  if (state === "done" || state === "cancelled" || state === "error") {
+    stopPolling();
+
+
+fetch("/api/config").then(r=>r.json()).then(c=>{
+  const el=document.querySelector("#dbpath");
+  if (el) {
+    const active = `Active DB: ${c.db_path}${c.db_exists ? "" : " (missing)"}`;
+    const conf = c.configured_db_path ? `Configured: ${c.configured_db_path}${c.configured_db_exists ? "" : " (missing)"}` : "";
+    el.textContent = conf ? `${active} — ${conf}` : active;
+  }
+}).catch(()=>{});
+
+loadItems();
+    const s1 = document.querySelector("#status");
+    const s2 = document.querySelector("#status2");
+    const msg =
+      (state === "cancelled") ? "Cancelled — showing what was fetched so far." :
+      (state === "done") ? "Update complete." :
+      ("Update error: " + (job.error || "unknown"));
+    if (s1) s1.textContent = msg;
+    if (s2) s2.textContent = msg;
+    setProgressUI(false);
+  }
+}
+
+function stopPolling(){
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+  document.querySelector("#updateCancel").disabled = true;
+  jobId = null;
+}
+
+document.querySelector("#updateStart").onclick = async () => {
+  const s1 = document.querySelector("#status");
+  const s2 = document.querySelector("#status2");
+  if (s1) s1.textContent = "Starting update…";
+  const r = await fetch("/api/update_start", {method:"POST"});
+  const j = await r.json();
+  jobId = j.job_id;
+  setProgressUI(true, 0, 1, 0, 0, null, "running");
+  if (progressTimer) clearInterval(progressTimer);
+  progressTimer = setInterval(pollProgress, 800);
+  await pollProgress();
+};
+
+document.querySelector("#updateCancel").onclick = async () => {
+  if (!jobId) return;
+  const s1 = document.querySelector("#status");
+  const s2 = document.querySelector("#status2");
+  if (s1) s1.textContent = "Cancelling…";
+  await fetch("/api/update_cancel", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({job_id: jobId})});
+};
+
+document.querySelector("#schedulerToggle").onchange = async (e) => {
+  const enabled = e.target.checked;
+  await fetch("/api/scheduler", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled})});
+  await loadCounts();
+};
+
+document.querySelector("#bookmarkedOnly").onchange = loadItems;
+
+// OPML import/export
+const opmlMode = document.querySelector("#opmlMode");
+const newDbRow = document.querySelector("#newDbRow");
+const opmlImportStatus = document.querySelector("#opmlImportStatus");
+const opmlExportStatus = document.querySelector("#opmlExportStatus");
+
+if (opmlMode) {
+  opmlMode.addEventListener("change", () => {
+    const v = opmlMode.value;
+    if (newDbRow) newDbRow.hidden = (v !== "newdb");
+  });
+}
+
+document.querySelector("#opmlImportBtn").onclick = async () => {
+  const fileInput = document.querySelector("#opmlFile");
+  const mode = (document.querySelector("#opmlMode") || {}).value || "merge";
+  const newDbName = (document.querySelector("#newDbName") || {}).value || "";
+
+  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+    if (opmlImportStatus) opmlImportStatus.textContent = "Choose an OPML file first.";
+    return;
+  }
+
+  if (opmlImportStatus) opmlImportStatus.textContent = "Importing…";
+
+  const fd = new FormData();
+  fd.append("opml", fileInput.files[0]);
+  fd.append("mode", mode);
+  fd.append("new_db_name", newDbName);
+
+  try {
+    const r = await fetch("/api/opml_import", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!j.ok) {
+      if (opmlImportStatus) opmlImportStatus.textContent = "Import failed: " + (j.error || "unknown error");
+      return;
+    }
+    const note = `Imported ${j.imported || 0}, skipped ${j.skipped || 0}.`;
+    if (opmlImportStatus) opmlImportStatus.textContent = note;
+
+    // If a new DB was created/switched, refresh the DB pill
+    try {
+      const cfg = await fetch("/api/config");
+      const cj = await cfg.json();
+      if (cj && cj.db_path) {
+        const dbp = document.querySelector("#dbpath");
+        if (dbp) dbp.textContent = "DB: " + cj.db_path;
+      }
+    } catch {}
+
+    await loadCounts();
+    await loadItems();
+  } catch (e) {
+    if (opmlImportStatus) opmlImportStatus.textContent = "Import failed: " + (e && e.message ? e.message : e);
+  }
+};
+
+document.querySelector("#opmlExportBtn").onclick = () => {
+  if (opmlExportStatus) opmlExportStatus.textContent = "Downloading…";
+  // Trigger a download without messing with SPA state
+  window.location.href = "/api/opml_export";
+  setTimeout(() => { if (opmlExportStatus) opmlExportStatus.textContent = ""; }, 1500);
+};
+
+
+// ===== Feed manager =====
+function initFeedManager() {
+  const newUrl = document.querySelector("#newFeedUrl");
+  const createBtn = document.querySelector("#createFeedBtn");
+  const createStatus = document.querySelector("#createFeedStatus");
+
+  const search = document.querySelector("#feedSearch");
+  const results = document.querySelector("#feedResults");
+
+  const editor = document.querySelector("#feedEditor");
+  const editId = document.querySelector("#editFeedId");
+  const editUrl = document.querySelector("#editFeedUrl");
+  const editTitle = document.querySelector("#editFeedTitle");
+  const saveBtn = document.querySelector("#saveFeedBtn");
+  const deleteBtn = document.querySelector("#deleteFeedBtn");
+  const editorStatus = document.querySelector("#feedEditorStatus");
+
+  function setEditor(feed) {
+    if (!feed) {
+      editor.hidden = true;
+      editId.value = "";
+      editUrl.value = "";
+      editTitle.value = "";
+      if (editorStatus) editorStatus.textContent = "";
+      return;
+    }
+    editor.hidden = false;
+    editId.value = String(feed.id || "");
+    editUrl.value = feed.url || "";
+    editTitle.value = feed.title || "";
+    if (editorStatus) editorStatus.textContent = "";
+  }
+
+  async function refreshResults(q) {
+    const query = (q || "").trim();
+    if (!results) return;
+    if (!query) {
+      results.innerHTML = "";
+      return;
+    }
+    try {
+      const r = await fetch(`/api/feeds?q=${encodeURIComponent(query)}&limit=30`);
+      const j = await r.json();
+      if (!j.ok) {
+        results.textContent = "Search failed.";
+        return;
+      }
+      const feeds = j.feeds || [];
+      if (feeds.length === 0) {
+        results.textContent = "No matches.";
+        return;
+      }
+      // Render as a simple list of buttons
+      results.innerHTML = "";
+      const ul = document.createElement("div");
+      ul.style.display = "flex";
+      ul.style.flexDirection = "column";
+      ul.style.gap = "6px";
+      feeds.forEach(f => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.style.textAlign = "left";
+        b.textContent = (f.title ? f.title + " — " : "") + f.url;
+        b.onclick = async () => {
+          try {
+            const rr = await fetch(`/api/feed/${f.id}`);
+            const jj = await rr.json();
+            if (!jj.ok) {
+              if (editorStatus) editorStatus.textContent = "Could not load feed.";
+              return;
+            }
+            setEditor(jj.feed);
+          } catch (e) {
+            if (editorStatus) editorStatus.textContent = "Could not load feed.";
+          }
+        };
+        ul.appendChild(b);
+      });
+      results.appendChild(ul);
+    } catch {
+      results.textContent = "Search failed.";
+    }
+  }
+
+  // Debounced search
+  let t = null;
+  if (search) {
+    search.addEventListener("input", () => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => refreshResults(search.value), 200);
+    });
+  }
+
+  if (createBtn) {
+    createBtn.onclick = async () => {
+      const u = (newUrl && newUrl.value ? newUrl.value : "").trim();
+      if (!u) {
+        if (createStatus) createStatus.textContent = "Enter a URL first.";
+        return;
+      }
+      if (createStatus) createStatus.textContent = "Working…";
+      try {
+        const r = await fetch("/api/feed_create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: u })
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          if (createStatus) createStatus.textContent = (j.error || "Create failed.");
+          return;
+        }
+        if (createStatus) createStatus.textContent = j.existing ? "Feed already exists." : "Feed created.";
+        setEditor(j.feed);
+        // Reload right pane entries and counts
+        await loadCounts();
+        await loadItems();
+      } catch (e) {
+        if (createStatus) createStatus.textContent = "Create failed.";
+      }
+    };
+  }
+
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      const id = parseInt(editId.value || "0", 10);
+      const url = (editUrl.value || "").trim();
+      const title = (editTitle.value || "").trim();
+      if (!id) {
+        if (editorStatus) editorStatus.textContent = "No feed selected.";
+        return;
+      }
+      if (!url) {
+        if (editorStatus) editorStatus.textContent = "URL required.";
+        return;
+      }
+      if (editorStatus) editorStatus.textContent = "Saving…";
+      try {
+        const r = await fetch("/api/feed_update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, url, title })
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          if (editorStatus) editorStatus.textContent = (j.error || "Save failed.");
+          return;
+        }
+        if (editorStatus) editorStatus.textContent = "Saved.";
+        setEditor(j.feed);
+        // Update result list and right pane
+        await refreshResults(search ? search.value : "");
+        await loadCounts();
+        await loadItems();
+      } catch {
+        if (editorStatus) editorStatus.textContent = "Save failed.";
+      }
+    };
+  }
+
+  if (deleteBtn) {
+    deleteBtn.onclick = async () => {
+      const id = parseInt(editId.value || "0", 10);
+      if (!id) return;
+      if (!confirm("Delete this feed? This will also remove its stored entries.")) return;
+      if (editorStatus) editorStatus.textContent = "Deleting…";
+      try {
+        const r = await fetch("/api/feed_delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id })
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          if (editorStatus) editorStatus.textContent = (j.error || "Delete failed.");
+          return;
+        }
+        setEditor(null);
+        if (editorStatus) editorStatus.textContent = "";
+        await refreshResults(search ? search.value : "");
+        await loadCounts();
+        await loadItems();
+      } catch {
+        if (editorStatus) editorStatus.textContent = "Delete failed.";
+      }
+    };
+  }
+
+  // start hidden editor
+  setEditor(null);
+}
+
+
+// Sidebar wiring
+try { initSidebar(); } catch (e) { console.error("initSidebar failed", e); }
+try { initDbSelector(); } catch (e) { console.error("initDbSelector failed", e); }
+try { initFeedManager(); } catch (e) { console.error("initFeedManager failed", e); }
+
+loadItems();
+
+</script>
+</body>
+
+</html>
