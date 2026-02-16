@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  localrss:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    volumes:
+      - ./data:/data
+    environment:
+      - RSS_DB=/data/rss.db
+      - RSS_PORT=8787
+    expose:
+      - "8787"
+    networks:
+      - web
+
+networks:
+  web:
+    external: true

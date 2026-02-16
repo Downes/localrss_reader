@@ -705,22 +705,37 @@ def index():
 
 @app.route("/api/items")
 def api_items():
-    bookmarked_only = int(request.args.get("bookmarked", "0"))
+    filter_mode = request.args.get("filter", "unread").lower()
     limit = int(request.args.get("limit", "1600"))
     cutoff = cutoff_ts()
 
     db = get_db()
-    rows = db.execute("""
-      SELECT e.id, e.title, e.link, e.published, e.content_html, e.bookmarked,
+
+    # Build WHERE clause based on filter mode
+    if filter_mode == "read":
+        where_clause = "e.read_at IS NOT NULL AND e.published >= ?"
+        params = (cutoff, limit)
+    elif filter_mode == "bookmarked":
+        where_clause = "e.bookmarked = 1"
+        params = (limit,)
+    elif filter_mode == "all":
+        where_clause = "e.published >= ?"
+        params = (cutoff, limit)
+    else:  # unread (default)
+        where_clause = "e.read_at IS NULL AND e.published >= ?"
+        params = (cutoff, limit)
+
+    query = f"""
+      SELECT e.id, e.title, e.link, e.published, e.content_html, e.bookmarked, e.read_at,
              f.title AS feed_title, f.month_count
       FROM entries e
       JOIN feeds f ON f.id = e.feed_id
-      WHERE e.read_at IS NULL
-        AND e.published >= ?
-        AND (? = 0 OR e.bookmarked = 1)
+      WHERE {where_clause}
       ORDER BY f.month_count ASC, e.published DESC
       LIMIT ?
-    """, (cutoff, bookmarked_only, limit)).fetchall()
+    """
+
+    rows = db.execute(query, params).fetchall()
 
     items = []
     for r in rows:
@@ -733,6 +748,7 @@ def api_items():
             "published": int(r["published"] or now_ts()),
             "content_html": r["content_html"] or "",
             "bookmarked": int(r["bookmarked"] or 0),
+            "read_at": r["read_at"],
         })
     return jsonify(items)
 

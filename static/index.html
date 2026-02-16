@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Local RSS</title>
   <style>
 [hidden]{display:none !important;}
@@ -54,7 +55,7 @@ body{
     .content img {
       max-width: min(500px, 100%);
       height: auto;
-      display: block;
+      display: inline-block;
       cursor: zoom-in;
     }
 
@@ -64,8 +65,13 @@ body{
     /* Ensure toolbar looks good in sidebar */
     #toolbar { margin-bottom: 10px; }
 
-    /* ===== Two-pane layout (overlay sidebar) ===== */
-    body { margin: 0; }
+    /* ===== Two-pane layout (push sidebar) ===== */
+    body {
+      margin: 0;
+      display: flex;
+      overflow: hidden;
+      height: 100vh;
+    }
     #hamburger {
       position: fixed;
       top: 10px;
@@ -78,29 +84,26 @@ body{
       border-radius: 10px;
       background: #fff;
       cursor: pointer;
+      transition: left 160ms ease;
     }
     #backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.35);
-      z-index: 2500;
-      
+      display: none;
     }
     #sidebar {
-      position: fixed;
+      position: relative;
       top: 0;
       left: 0;
       height: 100vh;
       font-size: 12px;
-      width: min(400px, 100vw);
+      width: 400px;
+      flex-shrink: 0;
       box-sizing: border-box;
       padding: 0;
-overflow: auto;
+      overflow: auto;
       background: #fff;
       border-right: 1px solid #ddd;
-      z-index: 3000;
-      transform: translateX(-100%);
-      transition: transform 160ms ease;
+      margin-left: -400px;
+      transition: margin-left 160ms ease;
     }
 
     .sidebar-inner{
@@ -144,14 +147,19 @@ overflow: auto;
     }
     .sidebar-footer{ margin-top:12px; padding:10px 12px; font-size:12px; color:#555; border-top:1px solid var(--panel-border); }
     #mainPane {
-      width: 100vw;
+      flex: 1;
       height: 100vh;
       overflow: auto;
       box-sizing: border-box;
       padding: 12px;
       padding-top: 56px; /* space for hamburger */
     }
-    body.sidebar-open #sidebar { transform: translateX(0); }
+    body.sidebar-open #sidebar {
+      margin-left: 0;
+    }
+    body.sidebar-open #hamburger {
+      left: 410px;
+    }
 /* Toolbar layout inside sidebar */
     #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
 
@@ -281,11 +289,96 @@ button, input, select, textarea {
 }
 
 .title{
+  font-weight: 400;
+}
+
+.title.unread{
   font-weight: 650;
 }
 
 .meta{
   color: var(--muted2);
+}
+
+/* Mobile responsive styles */
+@media (max-width: 768px) {
+  /* Larger hamburger button */
+  #hamburger {
+    font-size: 24px;
+    line-height: 24px;
+    padding: 12px 16px;
+  }
+
+  /* Full-width sidebar on mobile */
+  #sidebar {
+    width: 100vw;
+    margin-left: -100vw;
+  }
+
+  body.sidebar-open #hamburger {
+    left: calc(100vw - 60px);
+  }
+
+  /* Larger base font size */
+  body {
+    font-size: 16px;
+  }
+
+  /* Larger titles */
+  .title {
+    font-size: 16px;
+    line-height: 1.4;
+  }
+
+  /* Larger metadata text */
+  .meta {
+    font-size: 14px;
+  }
+
+  /* Larger buttons */
+  button {
+    font-size: 16px;
+    padding: 12px 16px;
+    min-height: 44px;
+  }
+
+  /* Larger form controls */
+  input, select, textarea {
+    font-size: 16px;
+    padding: 12px;
+    min-height: 44px;
+  }
+
+  /* Larger sidebar sections */
+  .sidebar-inner {
+    padding: 70px 16px 16px 16px;
+  }
+
+  .sidebar-title {
+    font-size: 14px;
+  }
+
+  /* Larger touch targets for stars and bookmarks */
+  .star {
+    font-size: 20px;
+    padding: 8px;
+  }
+
+  /* More spacing for items */
+  .item {
+    padding: 16px;
+    margin: 12px 0;
+  }
+
+  /* Larger topbar text */
+  #topbar {
+    font-size: 14px;
+  }
+
+  .pill {
+    font-size: 14px;
+    padding: 4px 8px;
+  }
 }
 
 </style>
@@ -315,7 +408,15 @@ button, input, select, textarea {
           <button id="updateCancel" class="danger" hidden disabled>cancel Update</button>
 
           <label class="pill"><input type="checkbox" id="schedulerToggle"/> Background updating</label>
-          <label><input type="checkbox" id="bookmarkedOnly"/> Only bookmarked</label>
+          <label style="display: flex; gap: 8px; align-items: center;">
+            <span style="white-space: nowrap;">Show:</span>
+            <select id="filterMode">
+              <option value="unread" selected>Unread</option>
+              <option value="read">Read</option>
+              <option value="bookmarked">Bookmarked</option>
+              <option value="all">All</option>
+            </select>
+          </label>
 
           <progress id="prog" value="0" max="1" style="display:none;"></progress>
           <span class="pill" id="counts">…</span>
@@ -496,6 +597,11 @@ async function initDbSelector() {
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || "db_select failed");
       if (status) status.textContent = "";
+
+      // Update the database path display
+      const dbPathEl = document.querySelector("#dbpath");
+      if (dbPathEl) dbPathEl.textContent = `DB: ${j.db_path}`;
+
       // Reload the main list & counts against the new DB
       await loadItems();
       await loadCounts();
@@ -525,8 +631,8 @@ async function loadCounts(){
 }
 
 async function loadItems(){
-  const bookmarked = document.querySelector("#bookmarkedOnly").checked ? 1 : 0;
-  const r = await fetch(`/api/items?bookmarked=${bookmarked}&limit=1600`);
+  const filterMode = document.querySelector("#filterMode").value || "unread";
+  const r = await fetch(`/api/items?filter=${encodeURIComponent(filterMode)}&limit=1600`);
   items = await r.json();
 
   // reset state + caches
@@ -558,7 +664,7 @@ function renderInitial(){
     div.dataset.id = String(it.id);
 
     const title = document.createElement("div");
-    title.className = "title";
+    title.className = it.read_at ? "title" : "title unread";
     title.textContent = `${it.feed_title}: ${it.title}`;
     const collapseBtn = document.createElement("button");
     collapseBtn.textContent = "Collapse";
@@ -573,7 +679,8 @@ function renderInitial(){
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `${fmtDate(it.published)}  · feed/month=${it.month_count}`;
+    const readStatus = it.read_at ? " · ✓ read" : "";
+    meta.textContent = `${fmtDate(it.published)}  · feed/month=${it.month_count}${readStatus}`;
 
     const star = document.createElement("span");
     star.className = "star";
@@ -683,7 +790,17 @@ function expandEntry(entryId, scrollTop=false){
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({id: entryId})
-  }).then(() => loadCounts()).catch(() => {});
+  }).then(() => {
+    // Update the entry's read status in memory
+    if (it) it.read_at = now_ts();
+
+    // Update the title class to remove "unread"
+    const titleEl = titleElsById.get(entryId);
+    if (titleEl) titleEl.className = "title";
+
+    // Update counts
+    loadCounts();
+  }).catch(() => {});
 }
 
 function onTitleClick(it){
@@ -711,10 +828,7 @@ async function toggleBookmark(entryId){
 }
 
 document.addEventListener("keydown", (e) => {
-  // Disable entry-list keyboard shortcuts when the sidebar/options pane is open,
-  // or when the user is typing in a form field.
-  if (document.body.classList.contains("sidebar-open")) return;
-
+  // Disable entry-list keyboard shortcuts when the user is typing in a form field.
   const ae = document.activeElement;
   if (ae) {
     const tag = (ae.tagName || "").toLowerCase();
@@ -724,6 +838,13 @@ document.addEventListener("keydown", (e) => {
   }
 
   if (e.key === "j" || e.key === "J") {
+    // Do nothing if at bottom of list
+    if (selected >= items.length - 1) return;
+
+    // Collapse current entry
+    collapseExpanded();
+
+    // Move to next and expand
     move(1);
     const it = items[selected];
     if (it) expandEntry(it.id, true);
@@ -731,6 +852,13 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "k" || e.key === "K") {
+    // Do nothing if at top of list
+    if (selected <= 0) return;
+
+    // Collapse current entry
+    collapseExpanded();
+
+    // Move to previous and expand
     move(-1);
     const it = items[selected];
     if (it) expandEntry(it.id, true);
@@ -901,7 +1029,7 @@ document.querySelector("#schedulerToggle").onchange = async (e) => {
   await loadCounts();
 };
 
-document.querySelector("#bookmarkedOnly").onchange = loadItems;
+document.querySelector("#filterMode").onchange = loadItems;
 
 // OPML import/export
 const opmlMode = document.querySelector("#opmlMode");
