@@ -1,5 +1,19 @@
 # LocalRSSReader v0.4.9
 
+## 📦 Windows Desktop App Available!
+
+A standalone desktop application is now available with:
+- System tray integration
+- Automatic database sync with VPS
+- No Python installation required for end users
+- One-click build process
+
+See [QUICKSTART_WINDOWS.md](QUICKSTART_WINDOWS.md) for building and [README_DESKTOP.md](README_DESKTOP.md) for full documentation.
+
+---
+
+## Latest Changes
+
 Fix:
 - Resolves "mktime argument out of range" by using safe date conversion for feedparser struct_time values.
   - Some feeds emit invalid years (e.g. 0001 or 9999), which can crash time.mktime() on Windows.

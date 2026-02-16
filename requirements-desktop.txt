@@ -1,0 +1,14 @@
+# Desktop application requirements
+# Includes all Flask dependencies plus system tray/packaging tools
+
+# Web framework (from requirements.txt)
+flask
+aiohttp
+feedparser
+
+# Desktop/System Tray
+pystray>=0.19.0
+Pillow>=10.0.0
+
+# Packaging
+pyinstaller>=6.0.0
