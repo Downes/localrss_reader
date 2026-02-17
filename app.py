@@ -136,11 +136,20 @@ DB_WRITE_LOCK = threading.Lock()
 def connect_db() -> sqlite3.Connection:
     """
     Connect to SQLite database.
+    - Re-reads the persisted DB selection on every connect so all Gunicorn
+      workers stay in sync when the user switches databases.
     - If RSS_DB points to a path whose directory doesn't exist, create it.
     - If the path cannot be opened, fall back to a local rss.db next to app.py,
       so the app stays up (with an empty/new DB) instead of crashing.
     """
-    global ACTIVE_DB_PATH
+    global ACTIVE_DB_PATH, DB_PATH, DB_PATH_ABS
+
+    # Re-read persisted selection so multi-worker Gunicorn stays in sync
+    last_abs = _load_last_db_abs()
+    if last_abs and os.path.exists(last_abs):
+        DB_PATH = last_abs
+        DB_PATH_ABS = last_abs
+        ACTIVE_DB_PATH = last_abs
 
     db_abs = os.path.abspath(DB_PATH)
     parent = os.path.dirname(db_abs)
@@ -758,6 +767,18 @@ def api_mark_read():
     with DB_WRITE_LOCK:
         db = get_db()
         db.execute("UPDATE entries SET read_at=? WHERE id=?", (now_ts(), entry_id))
+        db.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/mark_all_read", methods=["POST"])
+def api_mark_all_read():
+    cutoff = cutoff_ts()
+    with DB_WRITE_LOCK:
+        db = get_db()
+        db.execute(
+            "UPDATE entries SET read_at=? WHERE read_at IS NULL AND published >= ?",
+            (now_ts(), cutoff)
+        )
         db.commit()
     return jsonify({"ok": True})
 
