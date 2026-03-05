@@ -216,6 +216,11 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_entries_feed_pub ON entries(feed_id, published);
     """)
     con.commit()
+    try:
+        con.execute("ALTER TABLE feeds ADD COLUMN error_msg TEXT")
+        con.commit()
+    except Exception:
+        pass
     con.close()
 
 def _sanitize_db_name(name: str) -> str:
@@ -515,7 +520,7 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                         mcrow = db.execute("SELECT month_count FROM feeds WHERE id=?", (feed_id,)).fetchone()
                         mc = int(mcrow["month_count"] or 0) if mcrow else 0
                         db.execute(
-                            "UPDATE feeds SET last_fetch=?, fail_count=0, next_fetch=? WHERE id=?",
+                            "UPDATE feeds SET last_fetch=?, fail_count=0, next_fetch=?, error_msg=NULL WHERE id=?",
                             (now_ts(), now_ts() + choose_interval(mc), feed_id)
                         )
                     elif kind != "ok":
@@ -523,16 +528,20 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                         row = db.execute("SELECT fail_count FROM feeds WHERE id=?", (feed_id,)).fetchone()
                         fail = int(row["fail_count"] or 0) + 1
                         backoff = min(6 * 3600, (2 ** min(fail, 8)) * 60)
+                        if kind == "http_error":
+                            error_msg = f"HTTP {payload}"
+                        else:
+                            error_msg = (str(payload) or "Connection error")[:500]
                         db.execute(
-                            "UPDATE feeds SET last_fetch=?, fail_count=?, next_fetch=? WHERE id=?",
-                            (now_ts(), fail, now_ts() + backoff, feed_id)
+                            "UPDATE feeds SET last_fetch=?, fail_count=?, next_fetch=?, error_msg=? WHERE id=?",
+                            (now_ts(), fail, now_ts() + backoff, error_msg, feed_id)
                         )
                     else:
                         # Parse & insert. Any weird entry dates should not crash the whole job.
                         parsed = feedparser.parse(payload)
                         feed_title = (parsed.feed.get("title") or "").strip() or None
                         db.execute(
-                            "UPDATE feeds SET title=COALESCE(?, title), etag=?, last_modified=?, last_fetch=?, last_ok=?, fail_count=0 WHERE id=?",
+                            "UPDATE feeds SET title=COALESCE(?, title), etag=?, last_modified=?, last_fetch=?, last_ok=?, fail_count=0, error_msg=NULL WHERE id=?",
                             (feed_title, etag, last_mod, now_ts(), now_ts(), feed_id)
                         )
 
@@ -870,10 +879,13 @@ def api_feeds():
 @app.route("/api/feed/<int:feed_id>")
 def api_feed_get(feed_id: int):
     db = get_db()
-    r = db.execute("SELECT id, url, title FROM feeds WHERE id=?", (feed_id,)).fetchone()
+    r = db.execute("SELECT id, url, title, fail_count, error_msg FROM feeds WHERE id=?", (feed_id,)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "Unknown feed"}), 404
-    return jsonify({"ok": True, "feed": {"id": r["id"], "url": r["url"], "title": r["title"]}})
+    return jsonify({"ok": True, "feed": {
+        "id": r["id"], "url": r["url"], "title": r["title"],
+        "fail_count": int(r["fail_count"] or 0), "error_msg": r["error_msg"],
+    }})
 
 
 def _update_one_feed_now(feed_id: int):
@@ -883,6 +895,27 @@ def _update_one_feed_now(feed_id: int):
     except RuntimeError:
         # If an event loop is already running in this thread (unlikely in Flask), skip.
         pass
+
+
+@app.route("/api/feed_discover", methods=["POST"])
+def api_feed_discover():
+    """Discover the RSS/Atom URL for a given website URL without creating a feed."""
+    data = request.get_json(silent=True) or {}
+    input_url = (data.get("url") or "").strip()
+    if not input_url:
+        return jsonify({"ok": False, "error": "url required"}), 400
+    try:
+        feed_url, kind = discover_feed_url(input_url)
+        title = None
+        try:
+            feed_bytes, ct = _fetch_url_bytes(feed_url)
+            parsed = feedparser.parse(feed_bytes)
+            title = (parsed.feed.get("title") or "").strip() or None
+        except Exception:
+            pass
+        return jsonify({"ok": True, "feed_url": feed_url, "kind": kind, "title": title})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/api/feed_create", methods=["POST"])
@@ -1000,6 +1033,49 @@ def api_feed_delete():
             db.close()
 
     return jsonify({"ok": True})
+
+@app.route("/api/feeds_errors")
+def api_feeds_errors():
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, url, title, fail_count, error_msg, last_fetch, last_ok FROM feeds"
+        " WHERE fail_count > 0 ORDER BY fail_count DESC, COALESCE(title, url)"
+    ).fetchall()
+    return jsonify({"ok": True, "feeds": [{
+        "id": r["id"], "url": r["url"], "title": r["title"],
+        "fail_count": int(r["fail_count"] or 0), "error_msg": r["error_msg"],
+        "last_fetch": r["last_fetch"], "last_ok": r["last_ok"],
+    } for r in rows]})
+
+
+@app.route("/api/feed_retry", methods=["POST"])
+def api_feed_retry():
+    block = _require_no_running_update()
+    if block:
+        return block
+
+    data = request.get_json(silent=True) or {}
+    feed_id = int(data.get("id") or 0)
+    if not feed_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+
+    with DB_WRITE_LOCK:
+        db = connect_db()
+        try:
+            row = db.execute("SELECT id FROM feeds WHERE id=?", (feed_id,)).fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Unknown feed"}), 404
+            db.execute(
+                "UPDATE feeds SET fail_count=0, next_fetch=0, error_msg=NULL WHERE id=?",
+                (feed_id,)
+            )
+            db.commit()
+            _update_one_feed_now(feed_id)
+        finally:
+            db.close()
+
+    return jsonify({"ok": True})
+
 
 @app.route("/api/stats")
 def api_stats():
@@ -1149,6 +1225,13 @@ def api_opml_import():
             con.close()
 
     return jsonify({"ok": True, "mode": mode, "imported": imported, "skipped": skipped, "db_path": ACTIVE_DB_PATH})
+
+# Run schema creation + migrations at import time (covers gunicorn and direct invocation)
+try:
+    init_db()
+except Exception as _e:
+    print(f"[WARN] init_db failed at startup: {_e}", file=sys.stderr)
+
 
 def import_feeds_txt(path: str = "feeds.txt"):
     if not os.path.exists(path):

@@ -37,9 +37,9 @@ body{
 }
 
     #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
-    #status { color:#555; min-width: 260px; }
+    #status { color:#555; min-width: 255px; }
     .item { padding: 8px; border-bottom: 1px solid #ddd; }
-    .item.selected { outline: 2px solid #999; }
+    .item.selected { box-shadow: 0 0 0 2px rgba(37,99,235,0.5) inset; }
     .title { cursor: pointer; }
     .meta { color:#666; font-size: 12px; display:flex; gap:10px; align-items:center; }
     .content { margin-top: 8px; display:none; }
@@ -72,19 +72,31 @@ body{
       overflow: hidden;
       height: 100vh;
     }
-    #hamburger {
+    #topnav {
       position: fixed;
-      top: 10px;
-      left: 10px;
-      z-index: 3001;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      z-index: 3000;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--panel-border);
+      box-shadow: var(--shadow-sm);
+      box-sizing: border-box;
+    }
+    #hamburger {
       font-size: 18px;
       line-height: 18px;
-      padding: 8px 10px;
+      padding: 6px 10px;
       border: 1px solid #bbb;
       border-radius: 10px;
       background: #fff;
       cursor: pointer;
-      transition: left 160ms ease;
+      flex-shrink: 0;
     }
     #backdrop {
       display: none;
@@ -93,7 +105,8 @@ body{
       position: relative;
       top: 0;
       left: 0;
-      height: 100vh;
+      height: calc(100vh - 55px);
+      margin-top: 55px;
       font-size: 12px;
       width: 400px;
       flex-shrink: 0;
@@ -108,7 +121,7 @@ body{
 
     .sidebar-inner{
       box-sizing:border-box;
-      padding: 56px 12px 12px 12px; /* leave space for hamburger */
+      padding: 12px;
     }
     .sidebar-section{
       margin-bottom: 18px;
@@ -145,27 +158,32 @@ body{
       border-top: 1px solid #ddd;
       margin: 14px 0;
     }
+    @keyframes editor-highlight {
+      0%   { box-shadow: 0 0 0 3px var(--accent); background: #eff6ff; }
+      70%  { box-shadow: 0 0 0 3px var(--accent); background: #eff6ff; }
+      100% { box-shadow: none; background: transparent; }
+    }
+    #feedEditor.highlight {
+      border-radius: var(--radius-sm);
+      animation: editor-highlight 1.6s ease forwards;
+    }
     .sidebar-footer{ margin-top:12px; padding:10px 12px; font-size:12px; color:#555; border-top:1px solid var(--panel-border); }
     #mainPane {
       flex: 1;
-      height: 100vh;
+      height: calc(100vh - 55px);
+      margin-top: 55px;
       overflow: auto;
       box-sizing: border-box;
       padding: 12px;
-      padding-top: 56px; /* space for hamburger */
+      padding-top: 2px;
     }
     body.sidebar-open #sidebar {
       margin-left: 0;
-    }
-    body.sidebar-open #hamburger {
-      left: 410px;
     }
 /* Toolbar layout inside sidebar */
     #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
 
 
-    #topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
-    #status2 { color:#555; }
 
 
 button, input, select, textarea {
@@ -182,7 +200,8 @@ button, input, select, textarea {
 }
 
 .sidebar-inner{
-  padding: 56px 14px 14px 14px; /* keep hamburger clear */
+  padding: 14px;
+  padding-top: 2px;
 }
 
 .sidebar-section{
@@ -259,13 +278,10 @@ button, input, select, textarea {
   background: var(--app-bg);
 }
 
-#topbar{
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  box-shadow: var(--shadow-sm);
-}
+
+#status2 { color: #555; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+#counts2 { white-space: nowrap; flex-shrink: 0; }
+#dbpath { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
 
 .pill{
   background:#eef2ff;
@@ -282,10 +298,10 @@ button, input, select, textarea {
   padding: 10px 12px;
   box-shadow: var(--shadow-sm);
 }
+.item:first-child{ margin-top: 0; }
 
 .item.selected{
-  outline: 2px solid rgba(37,99,235,0.35);
-  outline-offset: 2px;
+  box-shadow: 0 0 0 2px rgba(37,99,235,0.5) inset, var(--shadow-sm);
 }
 
 .title{
@@ -313,10 +329,6 @@ button, input, select, textarea {
   #sidebar {
     width: 100vw;
     margin-left: -100vw;
-  }
-
-  body.sidebar-open #hamburger {
-    left: calc(100vw - 60px);
   }
 
   /* Larger base font size */
@@ -351,7 +363,7 @@ button, input, select, textarea {
 
   /* Larger sidebar sections */
   .sidebar-inner {
-    padding: 70px 16px 16px 16px;
+    padding: 16px;
   }
 
   .sidebar-title {
@@ -370,9 +382,10 @@ button, input, select, textarea {
     margin: 12px 0;
   }
 
-  /* Larger topbar text */
-  #topbar {
+  /* Larger topnav text */
+  #topnav {
     font-size: 14px;
+    height: 56px;
   }
 
   .pill {
@@ -385,7 +398,12 @@ button, input, select, textarea {
 </head>
 
 <body>
-  <button id="hamburger" class="hamburger" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" title="Menu">☰</button>
+  <div id="topnav">
+    <button id="hamburger" class="hamburger" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" title="Menu">☰</button>
+    <span class="pill" id="dbpath">DB: …</span>
+    <span class="pill" id="counts2">…</span>
+    <span id="status2"></span>
+  </div>
   <div id="backdrop" class="sidebar-backdrop" aria-hidden="true" hidden></div>
 
   <aside id="sidebar" class="sidebar" aria-hidden="true" aria-label="Options">
@@ -431,7 +449,7 @@ button, input, select, textarea {
         <h2 class="sidebar-title">Feeds</h2>
 
         <div class="row">
-          <label class="label" for="newFeedUrl">Create new feed</label>
+          <label class="label" for="newFeedUrl">Add new feed</label>
           <input id="newFeedUrl" type="url" placeholder="RSS/Atom URL or website URL" />
           <div class="io-actions">
             <button id="createFeedBtn" class="primary">Create / Discover</button>
@@ -446,6 +464,11 @@ button, input, select, textarea {
           <div id="feedResults" class="hint"></div>
         </div>
 
+        <div class="row" id="errorFeedsRow" hidden>
+          <button id="errorFeedsToggle" type="button" style="width:100%;text-align:left;">Feed errors: 0</button>
+          <div id="errorFeedsList" hidden style="margin-top:8px;display:flex;flex-direction:column;gap:8px;"></div>
+        </div>
+
         <div id="feedEditor" hidden>
           <hr class="sidebar-sep"/>
           <h3 class="sidebar-title" style="margin-top:0;">Edit feed</h3>
@@ -454,6 +477,7 @@ button, input, select, textarea {
           <div class="row">
             <label class="label" for="editFeedUrl">Feed URL</label>
             <input id="editFeedUrl" type="url" />
+            <a id="openFeedUrlLink" href="#" target="_blank" rel="noopener" style="font-size:12px;white-space:nowrap;margin-left:6px;" hidden>Open URL</a>
           </div>
 
           <div class="row">
@@ -461,8 +485,10 @@ button, input, select, textarea {
             <input id="editFeedTitle" type="text" />
           </div>
 
+          <div id="feedEditorError" class="hint" style="color:var(--danger);margin-bottom:6px;" hidden></div>
           <div class="io-actions">
             <button id="saveFeedBtn" class="primary">Save</button>
+            <button id="retryFeedBtn" hidden>Refresh feed</button>
             <button id="deleteFeedBtn" class="danger">Delete…</button>
             <span class="pill" id="feedEditorStatus" aria-live="polite"></span>
           </div>
@@ -507,11 +533,6 @@ button, input, select, textarea {
   </aside>
 
   <main id="mainPane" class="main" aria-label="Entries">
-    <div id="topbar">
-      <span class="pill" id="dbpath">DB: …</span>
-      <span class="pill" id="counts2">…</span>
-      <span id="status2"></span>
-    </div>
     <div id="list"></div>
   </main>
 
@@ -523,6 +544,10 @@ let expandedId = null;
 
 let jobId = null;
 let progressTimer = null;
+let _openFeedEditor = null;
+let _refreshErrorFeeds = null;
+let _openSidebar = null;
+let _expandErrorFeeds = null;
 
 // Sidebar: start collapsed; hamburger toggles open/closed.
 // ===== Sidebar overlay (single-source-of-truth: body.sidebar-open) =====
@@ -547,6 +572,8 @@ function initSidebar() {
 
   // Start closed (requirement)
   setOpen(false);
+
+  _openSidebar = () => setOpen(true);
 
   btn.addEventListener("click", () => setOpen(!isOpen()));
   backdrop.addEventListener("click", () => setOpen(false));
@@ -970,6 +997,7 @@ async function pollProgress(){
 
   if (state === "done" || state === "cancelled" || state === "error") {
     stopPolling();
+    if (_refreshErrorFeeds) _refreshErrorFeeds();
 
 
 fetch("/api/config").then(r=>r.json()).then(c=>{
@@ -984,12 +1012,33 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
 loadItems();
     const s1 = document.querySelector("#status");
     const s2 = document.querySelector("#status2");
-    const msg =
-      (state === "cancelled") ? "Cancelled — showing what was fetched so far." :
-      (state === "done") ? "Update complete." :
-      ("Update error: " + (job.error || "unknown"));
-    if (s1) s1.textContent = msg;
-    if (s2) s2.textContent = msg;
+    function setCompletionMsg(el) {
+      if (!el) return;
+      el.textContent = "";
+      if (state === "cancelled") {
+        el.textContent = "Cancelled — showing what was fetched so far.";
+      } else if (state === "error") {
+        el.textContent = "Update error: " + (job.error || "unknown");
+      } else {
+        el.appendChild(document.createTextNode(`Update complete — ${job.updated} new, `));
+        if (job.errors > 0) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = `${job.errors} errors`;
+          btn.style.cssText = "background:none;border:none;padding:0;color:var(--danger);text-decoration:underline;cursor:pointer;font:inherit;";
+          btn.onclick = () => {
+            if (_openSidebar) _openSidebar();
+            if (_expandErrorFeeds) _expandErrorFeeds();
+          };
+          el.appendChild(btn);
+          el.appendChild(document.createTextNode("."));
+        } else {
+          el.appendChild(document.createTextNode("0 errors."));
+        }
+      }
+    }
+    setCompletionMsg(s1);
+    setCompletionMsg(s2);
     setProgressUI(false);
   }
 }
@@ -1121,6 +1170,10 @@ function initFeedManager() {
   const deleteBtn = document.querySelector("#deleteFeedBtn");
   const editorStatus = document.querySelector("#feedEditorStatus");
 
+  const feedEditorError = document.getElementById("feedEditorError");
+  const retryFeedBtn = document.getElementById("retryFeedBtn");
+  const openFeedUrlLink = document.getElementById("openFeedUrlLink");
+
   function setEditor(feed) {
     if (!feed) {
       editor.hidden = true;
@@ -1128,13 +1181,31 @@ function initFeedManager() {
       editUrl.value = "";
       editTitle.value = "";
       if (editorStatus) editorStatus.textContent = "";
+      if (feedEditorError) { feedEditorError.hidden = true; feedEditorError.textContent = ""; }
+      if (retryFeedBtn) retryFeedBtn.hidden = true;
+      if (openFeedUrlLink) openFeedUrlLink.hidden = true;
       return;
     }
     editor.hidden = false;
     editId.value = String(feed.id || "");
     editUrl.value = feed.url || "";
     editTitle.value = feed.title || "";
+    if (openFeedUrlLink) {
+      if (feed.url) { openFeedUrlLink.href = feed.url; openFeedUrlLink.hidden = false; }
+      else openFeedUrlLink.hidden = true;
+    }
     if (editorStatus) editorStatus.textContent = "";
+    if (feedEditorError) {
+      if (feed.error_msg || feed.fail_count > 0) {
+        const times = feed.fail_count || 1;
+        feedEditorError.textContent = (feed.error_msg || "Unknown error") + ` — failed ${times} time${times !== 1 ? "s" : ""}`;
+        feedEditorError.hidden = false;
+      } else {
+        feedEditorError.hidden = true;
+        feedEditorError.textContent = "";
+      }
+    }
+    if (retryFeedBtn) retryFeedBtn.hidden = false;
   }
 
   async function refreshResults(q) {
@@ -1292,17 +1363,225 @@ function initFeedManager() {
     };
   }
 
+  if (retryFeedBtn) {
+    retryFeedBtn.onclick = async () => {
+      const id = parseInt(editId.value || "0", 10);
+      if (!id) return;
+      retryFeedBtn.disabled = true;
+      retryFeedBtn.textContent = "Refreshing…";
+      try {
+        const r = await fetch("/api/feed_retry", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({id})
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          if (editorStatus) editorStatus.textContent = j.error || "Refresh failed.";
+          retryFeedBtn.disabled = false;
+          retryFeedBtn.textContent = "Refresh feed";
+          return;
+        }
+        retryFeedBtn.textContent = "Refresh feed";
+        retryFeedBtn.disabled = false;
+        if (editorStatus) editorStatus.textContent = "Feed refreshed.";
+        const rr = await fetch(`/api/feed/${id}`);
+        const jj = await rr.json();
+        if (jj.ok) setEditor(jj.feed);
+        if (_refreshErrorFeeds) _refreshErrorFeeds();
+        await loadItems();
+      } catch {
+        retryFeedBtn.disabled = false;
+        retryFeedBtn.textContent = "Refresh feed";
+      }
+    };
+  }
+
+  _openFeedEditor = async (feedId) => {
+    try {
+      const r = await fetch(`/api/feed/${feedId}`);
+      const j = await r.json();
+      if (j.ok) {
+        setEditor(j.feed);
+        editor.scrollIntoView({behavior: "smooth", block: "nearest"});
+        editor.classList.remove("highlight");
+        // Force reflow so animation restarts if called multiple times
+        void editor.offsetWidth;
+        editor.classList.add("highlight");
+      }
+    } catch {}
+  };
+
+  // URL discovery on blur of editFeedUrl in the editor
+  if (editUrl) {
+    let _urlAtFocus = "";
+    editUrl.addEventListener("focus", () => { _urlAtFocus = editUrl.value.trim(); });
+    editUrl.addEventListener("blur", async () => {
+      const current = editUrl.value.trim();
+      if (!current || current === _urlAtFocus) return;
+      // Only attempt discovery if it looks like a plain website (not already a feed path)
+      if (!/^https?:\/\//i.test(current)) return;
+      if (editorStatus) editorStatus.textContent = "Checking URL…";
+      try {
+        const r = await fetch("/api/feed_discover", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({url: current})
+        });
+        const j = await r.json();
+        if (j.ok && j.kind === "discovered") {
+          editUrl.value = j.feed_url;
+          if (openFeedUrlLink) { openFeedUrlLink.href = j.feed_url; openFeedUrlLink.hidden = false; }
+          if (j.title && editTitle && !editTitle.value.trim()) editTitle.value = j.title;
+          if (editorStatus) editorStatus.textContent = "RSS/Atom feed found.";
+        } else if (j.ok && j.kind === "direct" && j.title) {
+          if (editTitle && !editTitle.value.trim()) editTitle.value = j.title;
+          if (editorStatus) editorStatus.textContent = "";
+        } else {
+          if (editorStatus) editorStatus.textContent = "";
+        }
+      } catch {
+        if (editorStatus) editorStatus.textContent = "";
+      }
+    });
+  }
+
   // start hidden editor
   setEditor(null);
 }
 
 
+function initErrorFeeds() {
+  const toggle = document.getElementById("errorFeedsToggle");
+  const list = document.getElementById("errorFeedsList");
+  const row = document.getElementById("errorFeedsRow");
+  if (!toggle || !list || !row) return;
+
+  let open = false;
+  let errorCount = 0;
+
+  function updateToggleText() {
+    toggle.textContent = open
+      ? `Hide error feeds (${errorCount})`
+      : `Feed errors: ${errorCount}`;
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch("/api/feeds_errors");
+      const j = await r.json();
+      if (!j.ok) return;
+      const feeds = j.feeds || [];
+      errorCount = feeds.length;
+      row.hidden = (errorCount === 0);
+      updateToggleText();
+
+      if (!open) return;
+
+      list.innerHTML = "";
+      if (errorCount === 0) {
+        open = false;
+        list.hidden = true;
+        return;
+      }
+
+      feeds.forEach(f => {
+        const item = document.createElement("div");
+        item.style.cssText = "background:#fff8f8;border:1px solid #f5c2c2;border-radius:8px;padding:8px 10px;font-size:12px;";
+
+        const titleDiv = document.createElement("div");
+        titleDiv.style.cssText = "font-weight:600;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        titleDiv.textContent = f.title || f.url;
+        titleDiv.title = f.url;
+
+        const errDiv = document.createElement("div");
+        errDiv.style.cssText = "color:#b91c1c;margin-bottom:6px;";
+        errDiv.textContent = (f.error_msg || "Unknown error") + ` — failed ${f.fail_count}×`;
+
+        const actions = document.createElement("div");
+        actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
+
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.textContent = "Edit";
+        editBtn.onclick = async () => {
+          if (_openFeedEditor) await _openFeedEditor(f.id);
+        };
+
+        const retryBtn = document.createElement("button");
+        retryBtn.type = "button";
+        retryBtn.textContent = "Retry now";
+        retryBtn.onclick = async () => {
+          retryBtn.disabled = true;
+          retryBtn.textContent = "Retrying…";
+          try {
+            const rr = await fetch("/api/feed_retry", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({id: f.id})
+            });
+            const jj = await rr.json();
+            if (!jj.ok) {
+              retryBtn.textContent = jj.error || "Failed";
+              retryBtn.disabled = false;
+              return;
+            }
+            retryBtn.textContent = "Retry now";
+            await refresh();
+            await loadCounts();
+          } catch {
+            retryBtn.textContent = "Error";
+            retryBtn.disabled = false;
+          }
+        };
+
+        actions.appendChild(editBtn);
+        actions.appendChild(retryBtn);
+        item.appendChild(titleDiv);
+        item.appendChild(errDiv);
+        item.appendChild(actions);
+        list.appendChild(item);
+      });
+    } catch (e) {
+      console.error("refreshErrorFeeds failed", e);
+    }
+  }
+
+  toggle.addEventListener("click", () => {
+    open = !open;
+    list.hidden = !open;
+    updateToggleText();
+    if (open) refresh();
+  });
+
+  _refreshErrorFeeds = refresh;
+
+  _expandErrorFeeds = () => {
+    if (!open) {
+      open = true;
+      list.hidden = false;
+      updateToggleText();
+      refresh();
+    }
+    row.scrollIntoView({behavior: "smooth", block: "nearest"});
+  };
+
+  refresh();
+}
+
 // Sidebar wiring
 try { initSidebar(); } catch (e) { console.error("initSidebar failed", e); }
 try { initDbSelector(); } catch (e) { console.error("initDbSelector failed", e); }
 try { initFeedManager(); } catch (e) { console.error("initFeedManager failed", e); }
+try { initErrorFeeds(); } catch (e) { console.error("initErrorFeeds failed", e); }
 
 loadItems();
+
+// Populate DB pill on page load
+fetch("/api/config").then(r=>r.json()).then(c=>{
+  const el = document.querySelector("#dbpath");
+  if (el && c.db_path) el.textContent = "DB: " + c.db_path;
+}).catch(()=>{});
 
 </script>
 </body>
