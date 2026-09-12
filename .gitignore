@@ -23,6 +23,9 @@ __pycache__/
 # Lock files
 .localrss.lock
 
+# Runtime state (which DB file was last selected)
+.localrss_last_db.json
+
 # Logs
 *.log
 

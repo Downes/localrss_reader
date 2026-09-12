@@ -18,7 +18,7 @@
   --shadow: 0 8px 24px rgba(17,24,39,0.08);
   --shadow-sm: 0 2px 10px rgba(17,24,39,0.08);
   --radius: 14px;
-  --radius-sm: 10px;
+  --radius-sm: 6px;
   --accent:#2563eb;
   --accent-2:#1d4ed8;
   --danger:#b91c1c;
@@ -36,7 +36,7 @@ body{
   background: var(--app-bg);
 }
 
-    #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
+    #toolbar { display:flex; gap:6px; align-items:center; margin-bottom:5px; flex-wrap: wrap; }
     #status { color:#555; min-width: 255px; }
     .item { padding: 8px; border-bottom: 1px solid #ddd; }
     .item.selected { box-shadow: 0 0 0 2px rgba(37,99,235,0.5) inset; }
@@ -126,21 +126,21 @@ body{
     .sidebar-section{
       margin-bottom: 18px;
     }
-    .hint{ font-size:12px; color:#666; margin-top:6px; }
-    .label{ display:block; font-size:12px; color:#444; margin-bottom:4px; }
-    .row{ margin-bottom:10px; }
+    .hint{ font-size:12px; color:#666; margin-top:3px; }
+    .label{ display:block; font-size:12px; color:#444; margin-bottom:2px; }
+    .row{ margin-bottom:4px; }
 
     .sidebar-title{
       font-size: 13px;
       font-weight: 700;
-      margin: 0 0 10px 0;
+      margin: 0 0 5px 0;
     }
     .io-row{
       display: grid;
       grid-template-columns: 120px 1fr;
-      gap: 10px;
+      gap: 5px;
       align-items: center;
-      margin: 8px 0;
+      margin: 4px 0;
     }
     .io-label{
       font-size: 13px;
@@ -148,15 +148,10 @@ body{
     }
     .io-actions{
       display:flex;
-      gap:10px;
+      gap:5px;
       align-items:center;
       flex-wrap: wrap;
-      margin-top: 10px;
-    }
-    .sidebar-sep{
-      border: 0;
-      border-top: 1px solid #ddd;
-      margin: 14px 0;
+      margin-top: 5px;
     }
     @keyframes editor-highlight {
       0%   { box-shadow: 0 0 0 3px var(--accent); background: #eff6ff; }
@@ -167,7 +162,7 @@ body{
       border-radius: var(--radius-sm);
       animation: editor-highlight 1.6s ease forwards;
     }
-    .sidebar-footer{ margin-top:12px; padding:10px 12px; font-size:12px; color:#555; border-top:1px solid var(--panel-border); }
+    .sidebar-footer{ margin-top:6px; padding:5px 6px; font-size:12px; color:#555; border-top:1px solid var(--panel-border); }
     #mainPane {
       flex: 1;
       height: calc(100vh - 55px);
@@ -181,7 +176,7 @@ body{
       margin-left: 0;
     }
 /* Toolbar layout inside sidebar */
-    #toolbar { display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap: wrap; }
+    #toolbar { display:flex; gap:6px; align-items:center; margin-bottom:5px; flex-wrap: wrap; }
 
 
 
@@ -200,55 +195,72 @@ button, input, select, textarea {
 }
 
 .sidebar-inner{
-  padding: 14px;
-  padding-top: 2px;
+  padding: 5px;
+  padding-top: 1px;
 }
 
 .sidebar-section{
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: 5px;
   box-shadow: var(--shadow-sm);
-  margin-bottom: 14px;
+  margin-bottom: 6px;
 }
 
 .sidebar-title{
   font-size: 12px;
   letter-spacing: .04em;
   text-transform: uppercase;
-  color: var(--muted);
-  margin: 0 0 10px 0;
+  color: #fff;
+  background: #616a78;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  margin: 0 0 5px 0;
 }
 
 .label{
   color: var(--muted);
 }
 
+.label.label-strong{
+  color: var(--text);
+  font-weight: 600;
+}
+
 .hint{ color: var(--muted2); }
 
-#sidebar input[type="text"],
-#sidebar input[type="file"],
+/* :not() rather than a type allowlist so every text-like input (text, url, search, ...)
+   gets the same look automatically - a missed type here is what caused "Add new feed"
+   and "Find / update feed" to look different from each other before. */
+#sidebar input:not([type="checkbox"]):not([type="hidden"]),
 #sidebar select,
 #sidebar textarea{
   width: 100%;
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  background: #fff;
+  padding: 3px 5px;
+  background: var(--app-bg);
 }
 
 #sidebar button{
-  font-size: 10pt;
+  font-size: 12px;
   border: 1px solid var(--panel-border);
-  border-radius: 999px;
-  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  padding: 3px 5px;
   background: #fff;
-  box-shadow: 0 1px 0 rgba(17,24,39,0.04);
+  box-shadow: 0 2px 0 rgba(17,24,39,0.075);
   cursor: pointer;
+  position: relative;
+  top: 0;
 }
 
 #sidebar button:hover{ background: #f8fafc; }
+
+#sidebar button:active{
+  box-shadow: 0 0 0 rgba(17,24,39,0.075);
+  top: 2px;
+}
 
 #sidebar button:disabled{
   opacity: .55;
@@ -256,13 +268,13 @@ button, input, select, textarea {
 }
 
 #sidebar button.primary{
-  background: linear-gradient(180deg, var(--accent), var(--accent-2));
-  color: #fff;
-  border-color: rgba(37,99,235,0.8);
+  background: #e5e7eb;
+  color: #333;
+  border-color: var(--panel-border);
 }
 
 #sidebar button.primary:hover{
-  filter: brightness(0.98);
+  background: #d1d5db;
 }
 
 #sidebar button.danger{
@@ -289,6 +301,20 @@ button, input, select, textarea {
   border-radius: 999px;
 }
 
+/* Transient status messages (e.g. "Enter a URL first.") - a plain box distinct
+   from the pill-shaped badges above, and invisible with no border/padding
+   until there's actually a message to show. */
+.status-msg{
+  font-size: 12px;
+  color: #444;
+}
+.status-msg:not(:empty){
+  padding: 1px 5px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  background: #f3f4f6;
+}
+
 /* Entry cards */
 .item{
   background: var(--panel-bg);
@@ -310,6 +336,15 @@ button, input, select, textarea {
 
 .title.unread{
   font-weight: 650;
+}
+
+.feed-thumb{
+  width: 16px;
+  height: 16px;
+  object-fit: cover;
+  border-radius: 3px;
+  vertical-align: -3px;
+  margin-right: 5px;
 }
 
 .meta{
@@ -415,8 +450,16 @@ button, input, select, textarea {
     <select id="dbSelect"></select>
   </div>
   <div id="dbSelectStatus" class="hint"></div>
+
+  <div class="row">
+    <label for="postSearch" class="label label-strong">Search posts</label>
+    <input id="postSearch" type="text" placeholder="Search title, author, or content" />
+    <div class="io-actions">
+      <button id="postSearchBtn" class="primary">Search</button>
+      <span class="status-msg" id="postSearchStatus" aria-live="polite"></span>
+    </div>
+  </div>
 </div>
-<hr class="sidebar-sep"/>
 
       <div class="sidebar-section">
         <h2 class="sidebar-title">Update</h2>
@@ -441,36 +484,33 @@ button, input, select, textarea {
           <span class="pill" id="counts">…</span>
           <span id="status"></span>
         </div>
-      </div>
-
-      <hr class="sidebar-sep"/>
-
-      <div class="sidebar-section" id="feedsSection">
-        <h2 class="sidebar-title">Feeds</h2>
-
-        <div class="row">
-          <label class="label" for="newFeedUrl">Add new feed</label>
-          <input id="newFeedUrl" type="url" placeholder="RSS/Atom URL or website URL" />
-          <div class="io-actions">
-            <button id="createFeedBtn" class="primary">Create / Discover</button>
-            <span class="pill" id="createFeedStatus" aria-live="polite"></span>
-          </div>
-          <div class="hint">If you paste a website URL, the reader will look for an RSS/Atom link in the page header.</div>
-        </div>
-
-        <div class="row">
-          <label class="label" for="feedSearch">Find / update feed</label>
-          <input id="feedSearch" type="text" placeholder="Search feeds by title or URL" />
-          <div id="feedResults" class="hint"></div>
-        </div>
 
         <div class="row" id="errorFeedsRow" hidden>
           <button id="errorFeedsToggle" type="button" style="width:100%;text-align:left;">Feed errors: 0</button>
           <div id="errorFeedsList" hidden style="margin-top:8px;display:flex;flex-direction:column;gap:8px;"></div>
         </div>
+      </div>
+
+      <div class="sidebar-section" id="feedsSection">
+        <h2 class="sidebar-title">Feeds</h2>
+
+        <div class="row">
+          <label class="label label-strong" for="newFeedUrl">Add new feed</label>
+          <input id="newFeedUrl" type="url" placeholder="RSS/Atom URL or website URL" />
+          <div class="io-actions">
+            <button id="createFeedBtn" class="primary">Create / Discover</button>
+            <span class="status-msg" id="createFeedStatus" aria-live="polite"></span>
+          </div>
+          <div class="hint">If you paste a website URL, the reader will look for an RSS/Atom link in the page header.</div>
+        </div>
+
+        <div class="row">
+          <label class="label label-strong" for="feedSearch">Find / update feed</label>
+          <input id="feedSearch" type="text" placeholder="Search feeds by title or URL" />
+          <div id="feedResults" class="hint"></div>
+        </div>
 
         <div id="feedEditor" hidden>
-          <hr class="sidebar-sep"/>
           <h3 class="sidebar-title" style="margin-top:0;">Edit feed</h3>
           <input id="editFeedId" type="hidden" />
 
@@ -485,12 +525,23 @@ button, input, select, textarea {
             <input id="editFeedTitle" type="text" />
           </div>
 
+          <div class="row">
+            <label class="label" for="editFeedAuthor">Author</label>
+            <input id="editFeedAuthor" type="text" placeholder="Filled in automatically when available" />
+          </div>
+
+          <div class="row">
+            <label class="label" for="editFeedImage">Image URL</label>
+            <input id="editFeedImage" type="url" placeholder="Filled in automatically when available" />
+          </div>
+
           <div id="feedEditorError" class="hint" style="color:var(--danger);margin-bottom:6px;" hidden></div>
           <div class="io-actions">
             <button id="saveFeedBtn" class="primary">Save</button>
             <button id="retryFeedBtn" hidden>Refresh feed</button>
+            <button id="showFeedPostsBtn">Show posts</button>
             <button id="deleteFeedBtn" class="danger">Delete…</button>
-            <span class="pill" id="feedEditorStatus" aria-live="polite"></span>
+            <span class="status-msg" id="feedEditorStatus" aria-live="polite"></span>
           </div>
         </div>
       </div>
@@ -519,20 +570,22 @@ button, input, select, textarea {
 
         <div class="io-actions">
           <button id="opmlImportBtn" class="primary">Import</button>
-          <span class="pill" id="opmlImportStatus" aria-live="polite"></span>
+          <span class="status-msg" id="opmlImportStatus" aria-live="polite"></span>
         </div>
-
-        <hr class="sidebar-sep"/>
 
         <div class="io-actions">
           <button id="opmlExportBtn" class="primary">Export OPML</button>
-          <span class="pill" id="opmlExportStatus" aria-live="polite"></span>
+          <span class="status-msg" id="opmlExportStatus" aria-live="polite"></span>
         </div>
       </div>
     </div>
   </aside>
 
   <main id="mainPane" class="main" aria-label="Entries">
+    <div id="feedPostsBanner" class="hint" hidden style="padding:8px 12px;display:flex;align-items:center;gap:10px;">
+      <span id="feedPostsBannerText"></span>
+      <button id="feedPostsBannerClose" type="button">Back to reading list</button>
+    </div>
     <div id="list"></div>
   </main>
 
@@ -642,6 +695,42 @@ async function initDbSelector() {
   });
 
   await refresh();
+
+  const searchInput = document.getElementById("postSearch");
+  const searchBtn = document.getElementById("postSearchBtn");
+  const searchStatus = document.getElementById("postSearchStatus");
+  if (searchInput && searchBtn) {
+    const runSearch = async () => {
+      const q = searchInput.value.trim();
+      if (!q) {
+        if (searchStatus) searchStatus.textContent = "Enter a search term first.";
+        return;
+      }
+      searchBtn.disabled = true;
+      searchBtn.textContent = "Searching…";
+      if (searchStatus) searchStatus.textContent = "";
+      try {
+        const r = await fetch(`/api/items?q=${encodeURIComponent(q)}&limit=1000`);
+        const results = await r.json();
+        setItemsAndRender(results);
+        const banner = document.getElementById("feedPostsBanner");
+        const bannerText = document.getElementById("feedPostsBannerText");
+        if (banner && bannerText) {
+          bannerText.textContent = `Found ${results.length} post${results.length !== 1 ? "s" : ""} matching "${q}" (ignores read/unread and retention filters).`;
+          banner.hidden = false;
+        }
+      } catch (e) {
+        if (searchStatus) searchStatus.textContent = "Search failed.";
+      } finally {
+        searchBtn.disabled = false;
+        searchBtn.textContent = "Search";
+      }
+    };
+    searchBtn.addEventListener("click", runSearch);
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") runSearch();
+    });
+  }
 }
 
 function fmtDate(ts){
@@ -658,10 +747,8 @@ async function loadCounts(){
   document.querySelector("#schedulerToggle").checked = !!s.scheduler_enabled;
 }
 
-async function loadItems(){
-  const filterMode = document.querySelector("#filterMode").value || "unread";
-  const r = await fetch(`/api/items?filter=${encodeURIComponent(filterMode)}&limit=1600`);
-  items = await r.json();
+function setItemsAndRender(newItems){
+  items = newItems;
 
   // reset state + caches
   selected = 0;
@@ -675,8 +762,14 @@ async function loadItems(){
   for (const it of items) itemById.set(it.id, it);
 
   renderInitial();
-  await loadCounts();
   updateSelectionUI(null, selected);
+}
+
+async function loadItems(){
+  const filterMode = document.querySelector("#filterMode").value || "unread";
+  const r = await fetch(`/api/items?filter=${encodeURIComponent(filterMode)}&limit=1600`);
+  setItemsAndRender(await r.json());
+  await loadCounts();
 }
 
 function renderInitial(){
@@ -694,6 +787,15 @@ function renderInitial(){
     const title = document.createElement("div");
     title.className = it.read_at ? "title" : "title unread";
     title.textContent = `${it.feed_title}: ${it.title}`;
+    if (it.feed_image) {
+      const feedThumb = document.createElement("img");
+      feedThumb.src = it.feed_image;
+      feedThumb.alt = "";
+      feedThumb.className = "feed-thumb";
+      feedThumb.loading = "lazy";
+      feedThumb.onerror = () => { feedThumb.remove(); };
+      title.insertBefore(feedThumb, title.firstChild);
+    }
     const collapseBtn = document.createElement("button");
     collapseBtn.textContent = "Collapse";
     collapseBtn.className = "collapseBtn";
@@ -708,13 +810,65 @@ function renderInitial(){
     const meta = document.createElement("div");
     meta.className = "meta";
     const readStatus = it.read_at ? " · ✓ read" : "";
-    meta.textContent = `${fmtDate(it.published)}  · ${it.month_count} posts/month${readStatus}`;
+    const authorPart = it.feed_author ? ` · ${it.feed_author}` : "";
+    meta.textContent = `${fmtDate(it.published)}  · ${it.month_count} posts/month${authorPart}${readStatus}`;
 
     const star = document.createElement("span");
     star.className = "star";
     star.textContent = it.bookmarked ? "★" : "☆";
     star.title = "Bookmark (or press B)";
     meta.appendChild(star);
+
+    const postBtn = document.createElement("span");
+    postBtn.textContent = "✎";
+    postBtn.title = "Send to gRSShopper (select text first to quote it)";
+    postBtn.style.cssText = "cursor:pointer; margin-left:8px; user-select:none;";
+    postBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const quote = window.getSelection().toString();
+      const author = it.author || it.feed_title;
+      // Candidate thumbnails: the feed's own thumbnail field (media:thumbnail /
+      // enclosure / itunes:image, extracted server-side at ingest) plus any
+      // <img> already sitting in the article HTML we have in memory - no
+      // extra fetch needed for either.
+      const images = [];
+      const seenImg = new Set();
+      const addImg = (u) => { if (u && /^https?:/.test(u) && !seenImg.has(u)) { seenImg.add(u); images.push(u); } };
+      addImg(it.thumbnail);
+      try {
+        const doc = new DOMParser().parseFromString(it.content_html || "", "text/html");
+        doc.querySelectorAll("img").forEach((img) => {
+          const iw = parseInt(img.getAttribute("width") || "0", 10);
+          const ih = parseInt(img.getAttribute("height") || "0", 10);
+          if ((iw && iw < 50) || (ih && ih < 50)) return; // skip obvious tracking pixels/icons
+          addImg(img.getAttribute("src"));
+        });
+      } catch (err) { /* malformed content, skip image scan */ }
+      const w = Math.min(Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0), 900);
+      const h = Math.min(Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0), 1000);
+      const winName = "grsshopper_edit";
+      window.open("", winName, `width=${w}, height=${h}`);
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = "https://www.downes.ca/cgi-bin/api.cgi";
+      form.target = winName;
+      const fields = {
+        cmd: "edit", id: "new", table: "post", hub: "feed",
+        url: it.link, title: it.title, feed: it.feed_title,
+        author: author, quote: quote, images: JSON.stringify(images.slice(0, 8))
+      };
+      for (const [name, value] of Object.entries(fields)) {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        input.value = value || "";
+        form.appendChild(input);
+      }
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+    });
+    meta.appendChild(postBtn);
 
     const content = document.createElement("div");
     content.className = "content";
@@ -734,6 +888,7 @@ function renderInitial(){
 
     title.addEventListener("click", (e) => {
       e.stopPropagation();
+      setSelected(idx);
       onTitleClick(it);
     });
 
@@ -836,8 +991,8 @@ function onTitleClick(it){
     if (it.link) window.open(it.link, "_blank");
     return;
   }
-  // Expand immediately
-  expandEntry(it.id);
+  // Expand and scroll it to the top of the viewport so reading can start right away
+  expandEntry(it.id, true);
 }
 
 // Bookmark toggle updates only that star (no full render)
@@ -1079,7 +1234,11 @@ document.querySelector("#schedulerToggle").onchange = async (e) => {
   await loadCounts();
 };
 
-document.querySelector("#filterMode").onchange = loadItems;
+document.querySelector("#filterMode").onchange = async () => {
+  const banner = document.getElementById("feedPostsBanner");
+  if (banner) banner.hidden = true;
+  await loadItems();
+};
 
 document.querySelector("#markAllRead").addEventListener("click", async () => {
   if (!confirm("Mark all unread entries as read?")) return;
@@ -1166,6 +1325,8 @@ function initFeedManager() {
   const editId = document.querySelector("#editFeedId");
   const editUrl = document.querySelector("#editFeedUrl");
   const editTitle = document.querySelector("#editFeedTitle");
+  const editAuthor = document.querySelector("#editFeedAuthor");
+  const editImage = document.querySelector("#editFeedImage");
   const saveBtn = document.querySelector("#saveFeedBtn");
   const deleteBtn = document.querySelector("#deleteFeedBtn");
   const editorStatus = document.querySelector("#feedEditorStatus");
@@ -1173,6 +1334,10 @@ function initFeedManager() {
   const feedEditorError = document.getElementById("feedEditorError");
   const retryFeedBtn = document.getElementById("retryFeedBtn");
   const openFeedUrlLink = document.getElementById("openFeedUrlLink");
+  const showFeedPostsBtn = document.getElementById("showFeedPostsBtn");
+  const feedPostsBanner = document.getElementById("feedPostsBanner");
+  const feedPostsBannerText = document.getElementById("feedPostsBannerText");
+  const feedPostsBannerClose = document.getElementById("feedPostsBannerClose");
 
   function setEditor(feed) {
     if (!feed) {
@@ -1180,6 +1345,8 @@ function initFeedManager() {
       editId.value = "";
       editUrl.value = "";
       editTitle.value = "";
+      if (editAuthor) editAuthor.value = "";
+      if (editImage) editImage.value = "";
       if (editorStatus) editorStatus.textContent = "";
       if (feedEditorError) { feedEditorError.hidden = true; feedEditorError.textContent = ""; }
       if (retryFeedBtn) retryFeedBtn.hidden = true;
@@ -1190,6 +1357,8 @@ function initFeedManager() {
     editId.value = String(feed.id || "");
     editUrl.value = feed.url || "";
     editTitle.value = feed.title || "";
+    if (editAuthor) editAuthor.value = feed.author || "";
+    if (editImage) editImage.value = feed.image || "";
     if (openFeedUrlLink) {
       if (feed.url) { openFeedUrlLink.href = feed.url; openFeedUrlLink.hidden = false; }
       else openFeedUrlLink.hidden = true;
@@ -1239,17 +1408,8 @@ function initFeedManager() {
         b.style.textAlign = "left";
         b.textContent = (f.title ? f.title + " — " : "") + f.url;
         b.onclick = async () => {
-          try {
-            const rr = await fetch(`/api/feed/${f.id}`);
-            const jj = await rr.json();
-            if (!jj.ok) {
-              if (editorStatus) editorStatus.textContent = "Could not load feed.";
-              return;
-            }
-            setEditor(jj.feed);
-          } catch (e) {
-            if (editorStatus) editorStatus.textContent = "Could not load feed.";
-          }
+          if (_openFeedEditor) await _openFeedEditor(f.id);
+          else if (editorStatus) editorStatus.textContent = "Could not load feed.";
         };
         ul.appendChild(b);
       });
@@ -1303,6 +1463,8 @@ function initFeedManager() {
       const id = parseInt(editId.value || "0", 10);
       const url = (editUrl.value || "").trim();
       const title = (editTitle.value || "").trim();
+      const author = (editAuthor && editAuthor.value || "").trim();
+      const image = (editImage && editImage.value || "").trim();
       if (!id) {
         if (editorStatus) editorStatus.textContent = "No feed selected.";
         return;
@@ -1316,7 +1478,7 @@ function initFeedManager() {
         const r = await fetch("/api/feed_update", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, url, title })
+          body: JSON.stringify({ id, url, title, author, image })
         });
         const j = await r.json();
         if (!j.ok) {
@@ -1394,6 +1556,36 @@ function initFeedManager() {
         retryFeedBtn.disabled = false;
         retryFeedBtn.textContent = "Refresh feed";
       }
+    };
+  }
+
+  if (showFeedPostsBtn) {
+    showFeedPostsBtn.onclick = async () => {
+      const id = parseInt(editId.value || "0", 10);
+      if (!id) return;
+      showFeedPostsBtn.disabled = true;
+      showFeedPostsBtn.textContent = "Loading…";
+      try {
+        const r = await fetch(`/api/items?feed_id=${id}&limit=5000`);
+        setItemsAndRender(await r.json());
+        if (feedPostsBanner && feedPostsBannerText) {
+          const title = editTitle.value || "this feed";
+          feedPostsBannerText.textContent = `Showing all ${items.length} post${items.length !== 1 ? "s" : ""} for "${title}" (ignores read/unread and retention filters).`;
+          feedPostsBanner.hidden = false;
+        }
+      } catch (e) {
+        if (editorStatus) editorStatus.textContent = "Could not load posts.";
+      } finally {
+        showFeedPostsBtn.disabled = false;
+        showFeedPostsBtn.textContent = "Show posts";
+      }
+    };
+  }
+
+  if (feedPostsBannerClose) {
+    feedPostsBannerClose.onclick = async () => {
+      if (feedPostsBanner) feedPostsBanner.hidden = true;
+      await loadItems();
     };
   }
 
@@ -1522,12 +1714,24 @@ function initErrorFeeds() {
             });
             const jj = await rr.json();
             if (!jj.ok) {
-              retryBtn.textContent = jj.error || "Failed";
+              errDiv.style.color = "#b91c1c";
+              errDiv.textContent = jj.error || "Retry failed";
+              retryBtn.textContent = "Retry now";
               retryBtn.disabled = false;
               return;
             }
+            // Show the result right here rather than refreshing the whole
+            // list, so a fixed feed doesn't just vanish out from under you.
+            const feed = jj.feed;
+            if (feed.fail_count === 0) {
+              errDiv.style.color = "#166534";
+              errDiv.textContent = "Fixed — feed fetched successfully.";
+            } else {
+              errDiv.style.color = "#b91c1c";
+              errDiv.textContent = (feed.error_msg || "Unknown error") + ` — failed ${feed.fail_count}×`;
+            }
             retryBtn.textContent = "Retry now";
-            await refresh();
+            retryBtn.disabled = false;
             await loadCounts();
           } catch {
             retryBtn.textContent = "Error";

@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from math import exp
 import io
 import json
 import xml.etree.ElementTree as ET
@@ -112,6 +113,10 @@ def _select_startup_db() -> None:
 _select_startup_db()
 RETENTION_DAYS = int(os.environ.get("RSS_RETENTION_DAYS", "30"))
 
+# Feeds this broken are almost certainly dead/misconfigured - stop burning
+# scheduler cycles on them until a human edits or manually retries the feed.
+MAX_FEED_FAIL_COUNT = int(os.environ.get("RSS_MAX_FEED_FAIL_COUNT", "50"))
+
 SCHEDULER_TICK_SECONDS = int(os.environ.get("RSS_TICK", "60"))
 SQLITE_TIMEOUT = float(os.environ.get("RSS_SQLITE_TIMEOUT", "30"))
 
@@ -202,6 +207,7 @@ def init_db():
       guid TEXT NOT NULL,
       title TEXT,
       link TEXT,
+      author TEXT,
       published INTEGER,
       content_html TEXT,
       read_at INTEGER,
@@ -218,6 +224,26 @@ def init_db():
     con.commit()
     try:
         con.execute("ALTER TABLE feeds ADD COLUMN error_msg TEXT")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE entries ADD COLUMN author TEXT")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE entries ADD COLUMN thumbnail TEXT")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE feeds ADD COLUMN feed_author TEXT")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE feeds ADD COLUMN feed_image TEXT")
         con.commit()
     except Exception:
         pass
@@ -427,6 +453,55 @@ def entry_content_html(entry) -> str:
             pass
     return entry.get("summary", "") or ""
 
+def entry_thumbnail(entry) -> str | None:
+    """Best-effort feed-supplied thumbnail: media:thumbnail, media:content
+    (image), an image enclosure, or itunes:image - in that order. Only looks
+    at data feedparser already parsed from the feed, no extra fetch."""
+    media_thumb = entry.get("media_thumbnail")
+    if media_thumb:
+        url = media_thumb[0].get("url")
+        if url:
+            return url
+    for m in (entry.get("media_content") or []):
+        if m.get("medium") == "image" or (m.get("type") or "").startswith("image/"):
+            if m.get("url"):
+                return m.get("url")
+    for enc in (entry.get("enclosures") or []):
+        if (enc.get("type") or "").startswith("image/") and enc.get("href"):
+            return enc.get("href")
+    image = entry.get("image")
+    if image and image.get("href"):
+        return image.get("href")
+    return None
+
+def feed_level_author(feed) -> str | None:
+    """Best-effort feed-supplied author name: Atom/RSS author, iTunes
+    podcast author, or publisher - in that order."""
+    author = (feed.get("author") or "").strip()
+    if author:
+        return author
+    name = ((feed.get("author_detail") or {}).get("name") or "").strip()
+    if name:
+        return name
+    publisher = (feed.get("publisher") or "").strip()
+    if publisher:
+        return publisher
+    return None
+
+def feed_level_image(feed) -> str | None:
+    """Best-effort feed-supplied image/thumbnail: RSS <image>, iTunes
+    podcast artwork, or Atom logo/icon - in that order."""
+    href = ((feed.get("image") or {}).get("href") or "").strip()
+    if href:
+        return href
+    logo = (feed.get("logo") or "").strip()
+    if logo:
+        return logo
+    icon = (feed.get("icon") or "").strip()
+    if icon:
+        return icon
+    return None
+
 def recompute_month_count(db, feed_id: int, cutoff: int):
     row = db.execute(
         "SELECT COUNT(*) AS c FROM entries WHERE feed_id=? AND published>=?",
@@ -434,6 +509,17 @@ def recompute_month_count(db, feed_id: int, cutoff: int):
     ).fetchone()
     c = int(row["c"])
     db.execute("UPDATE feeds SET month_count=? WHERE id=?", (c, feed_id))
+
+def post_score(published_ts: int, month_count: int, now: int) -> float:
+    """Rank score for a post: favours infrequent feeds and recent posts.
+    Higher score = show first. Uses feed's 30-day post count and exponential
+    freshness decay so low-volume feeds aren't buried by high-volume ones."""
+    r = max(float(month_count or 0), 0.25)   # posts per ~30 days, floor 0.25
+    age_days = max((now - published_ts) / 86400.0, 0.0)
+    feed_weight = 1.0 / ((r + 1.0) ** 0.7)
+    freshness = exp(-0.22 * age_days)
+    return feed_weight * freshness
+
 
 def choose_interval(month_count: int) -> int:
     if month_count <= 10:
@@ -479,7 +565,10 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
         feeds = db.execute(q, feed_ids).fetchall()
     else:
         if only_due:
-            feeds = db.execute("SELECT * FROM feeds WHERE next_fetch <= ?", (now_ts(),)).fetchall()
+            feeds = db.execute(
+                "SELECT * FROM feeds WHERE next_fetch <= ? AND fail_count < ?",
+                (now_ts(), MAX_FEED_FAIL_COUNT)
+            ).fetchall()
         else:
             feeds = db.execute("SELECT * FROM feeds").fetchall()
 
@@ -540,9 +629,15 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                         # Parse & insert. Any weird entry dates should not crash the whole job.
                         parsed = feedparser.parse(payload)
                         feed_title = (parsed.feed.get("title") or "").strip() or None
+                        f_author = feed_level_author(parsed.feed)
+                        f_image = feed_level_image(parsed.feed)
                         db.execute(
-                            "UPDATE feeds SET title=COALESCE(?, title), etag=?, last_modified=?, last_fetch=?, last_ok=?, fail_count=0, error_msg=NULL WHERE id=?",
-                            (feed_title, etag, last_mod, now_ts(), now_ts(), feed_id)
+                            """UPDATE feeds SET title=COALESCE(?, title),
+                                 feed_author=COALESCE(feed_author, ?),
+                                 feed_image=COALESCE(feed_image, ?),
+                                 etag=?, last_modified=?, last_fetch=?, last_ok=?, fail_count=0, error_msg=NULL
+                               WHERE id=?""",
+                            (feed_title, f_author, f_image, etag, last_mod, now_ts(), now_ts(), feed_id)
                         )
 
                         added_any = False
@@ -553,14 +648,16 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                                 guid = stable_guid(e)
                                 title = (e.get("title") or "").strip()
                                 link = e.get("link")
+                                author = (e.get("author") or "").strip() or None
                                 pub_ts = entry_published_ts(e)
                                 if pub_ts < cutoff:
                                     continue
                                 html = entry_content_html(e)
+                                thumb = entry_thumbnail(e)
                                 cur_ins = db.execute("""
-                                  INSERT OR IGNORE INTO entries(feed_id,guid,title,link,published,content_html,created_at)
-                                  VALUES(?,?,?,?,?,?,?)
-                                """, (feed_id, guid, title, link, pub_ts, html, now_ts()))
+                                  INSERT OR IGNORE INTO entries(feed_id,guid,title,link,author,published,content_html,thumbnail,created_at)
+                                  VALUES(?,?,?,?,?,?,?,?,?)
+                                """, (feed_id, guid, title, link, author, pub_ts, html, thumb, now_ts()))
                                 if cur_ins.rowcount:
                                     added_any = True
                             except Exception:
@@ -721,13 +818,113 @@ def start_background_scheduler():
 def index():
     return send_from_directory("static", "index.html")
 
+@app.route("/fetch_feed", methods=["GET"])
+def fetch_feed():
+    """Proxy endpoint for CList rss.js: fetch a single RSS/Atom feed and return items as JSON.
+    Compatible with the opml2json /fetch_feed response format."""
+    url = (request.args.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "url required"}), 400
+    try:
+        parsed = feedparser.parse(url)
+        feed_title = (parsed.feed.get("title") or "").strip()
+        items = []
+        for entry in parsed.entries:
+            item = {
+                "guid":         entry.get("id") or entry.get("link") or "",
+                "title":        entry.get("title"),
+                "link":         entry.get("link"),
+                "author":       (entry.get("author") or "").strip(),
+                "published":    entry.get("published"),
+                "summary":      entry.get("summary", ""),
+                "source":       feed_title or url,
+                "full_content": None,
+            }
+            if entry.get("content"):
+                item["full_content"] = entry.content[0].get("value")
+            elif entry.get("description"):
+                item["full_content"] = entry.get("description")
+            if entry.get("published_parsed"):
+                item["published_ts"] = safe_struct_time_to_ts(entry.published_parsed)
+            else:
+                item["published_ts"] = now_ts()
+            if entry.get("enclosures"):
+                audio = [e["href"] for e in entry.enclosures
+                         if (e.get("type") or "").startswith("audio/")]
+                if audio:
+                    item["audio"] = audio
+            items.append(item)
+        return jsonify({"ok": True, "title": feed_title, "feed_url": url, "items": items})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route("/api/items")
 def api_items():
-    filter_mode = request.args.get("filter", "unread").lower()
     limit = int(request.args.get("limit", "1600"))
-    cutoff = cutoff_ts()
-
     db = get_db()
+
+    feed_id = request.args.get("feed_id")
+    if feed_id:
+        # Full history for one feed - ignores retention cutoff and read state,
+        # since the point is to see everything stored, not the reading queue.
+        rows = db.execute("""
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.bookmarked, e.read_at,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
+          FROM entries e
+          JOIN feeds f ON f.id = e.feed_id
+          WHERE e.feed_id = ?
+          ORDER BY e.published DESC
+          LIMIT ?
+        """, (int(feed_id), limit)).fetchall()
+        return jsonify([{
+            "id": r["id"],
+            "feed_title": r["feed_title"] or "(untitled feed)",
+            "month_count": int(r["month_count"] or 0),
+            "feed_author": r["feed_author"] or None,
+            "feed_image": r["feed_image"] or None,
+            "title": r["title"] or "(no title)",
+            "link": r["link"],
+            "author": r["author"] or "",
+            "published": int(r["published"] or now_ts()),
+            "content_html": r["content_html"] or "",
+            "thumbnail": r["thumbnail"] or None,
+            "bookmarked": int(r["bookmarked"] or 0),
+            "read_at": r["read_at"],
+        } for r in rows])
+
+    q = request.args.get("q", "").strip()
+    if q:
+        # Search across all stored posts regardless of feed, read state, or
+        # retention cutoff - the point is to find something you remember, not
+        # to browse the current reading queue.
+        like = f"%{q}%"
+        rows = db.execute("""
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.bookmarked, e.read_at,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
+          FROM entries e
+          JOIN feeds f ON f.id = e.feed_id
+          WHERE e.title LIKE ? OR e.author LIKE ? OR e.content_html LIKE ?
+          ORDER BY e.published DESC
+          LIMIT ?
+        """, (like, like, like, limit)).fetchall()
+        return jsonify([{
+            "id": r["id"],
+            "feed_title": r["feed_title"] or "(untitled feed)",
+            "month_count": int(r["month_count"] or 0),
+            "feed_author": r["feed_author"] or None,
+            "feed_image": r["feed_image"] or None,
+            "title": r["title"] or "(no title)",
+            "link": r["link"],
+            "author": r["author"] or "",
+            "published": int(r["published"] or now_ts()),
+            "content_html": r["content_html"] or "",
+            "thumbnail": r["thumbnail"] or None,
+            "bookmarked": int(r["bookmarked"] or 0),
+            "read_at": r["read_at"],
+        } for r in rows])
+
+    filter_mode = request.args.get("filter", "unread").lower()
+    cutoff = cutoff_ts()
 
     # Build WHERE clause based on filter mode
     if filter_mode == "read":
@@ -744,30 +941,47 @@ def api_items():
         params = (cutoff, limit)
 
     query = f"""
-      SELECT e.id, e.title, e.link, e.published, e.content_html, e.bookmarked, e.read_at,
-             f.title AS feed_title, f.month_count
+      SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.bookmarked, e.read_at,
+             f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
       FROM entries e
       JOIN feeds f ON f.id = e.feed_id
       WHERE {where_clause}
-      ORDER BY f.month_count ASC, e.published DESC
-      LIMIT ?
     """
 
-    rows = db.execute(query, params).fetchall()
+    # Strip the LIMIT placeholder from params — we apply the limit after
+    # Python-side scoring so the cut happens on the ranked list, not before.
+    sql_params = params[:-1]
+    rows = db.execute(query, sql_params).fetchall()
 
+    now = now_ts()
     items = []
     for r in rows:
+        pub = int(r["published"] or now)
+        mc  = int(r["month_count"] or 0)
         items.append({
             "id": r["id"],
             "feed_title": r["feed_title"] or "(untitled feed)",
-            "month_count": int(r["month_count"] or 0),
+            "month_count": mc,
+            "feed_author": r["feed_author"] or None,
+            "feed_image": r["feed_image"] or None,
             "title": r["title"] or "(no title)",
             "link": r["link"],
-            "published": int(r["published"] or now_ts()),
+            "author": r["author"] or "",
+            "published": pub,
             "content_html": r["content_html"] or "",
+            "thumbnail": r["thumbnail"] or None,
             "bookmarked": int(r["bookmarked"] or 0),
             "read_at": r["read_at"],
+            "_score": post_score(pub, mc, now),
         })
+
+    items.sort(key=lambda x: x["_score"], reverse=True)
+    items = items[:limit]
+
+    # Remove internal scoring field before sending to client
+    for item in items:
+        del item["_score"]
+
     return jsonify(items)
 
 @app.route("/api/mark_read", methods=["POST"])
@@ -879,12 +1093,13 @@ def api_feeds():
 @app.route("/api/feed/<int:feed_id>")
 def api_feed_get(feed_id: int):
     db = get_db()
-    r = db.execute("SELECT id, url, title, fail_count, error_msg FROM feeds WHERE id=?", (feed_id,)).fetchone()
+    r = db.execute("SELECT id, url, title, fail_count, error_msg, feed_author, feed_image FROM feeds WHERE id=?", (feed_id,)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "Unknown feed"}), 404
     return jsonify({"ok": True, "feed": {
         "id": r["id"], "url": r["url"], "title": r["title"],
         "fail_count": int(r["fail_count"] or 0), "error_msg": r["error_msg"],
+        "author": r["feed_author"], "image": r["feed_image"],
     }})
 
 
@@ -975,6 +1190,11 @@ def api_feed_update():
     feed_id = int(data.get("id") or 0)
     url = (data.get("url") or "").strip()
     title = (data.get("title") or "").strip() or None
+    # Manually cleared to blank means "let the harvester fill this back in",
+    # so store NULL rather than "" - COALESCE(feed_author, ...) only fills a
+    # NULL, never a value someone deliberately typed and saved as empty vs blank.
+    author = (data.get("author") or "").strip() or None
+    image = (data.get("image") or "").strip() or None
     if not feed_id:
         return jsonify({"ok": False, "error": "id required"}), 400
     if not url:
@@ -992,18 +1212,21 @@ def api_feed_update():
             try:
                 if url != row["url"]:
                     db.execute(
-                        "UPDATE feeds SET url=?, title=?, etag=NULL, last_modified=NULL, fail_count=0, next_fetch=0 WHERE id=?",
-                        (url, title, feed_id),
+                        "UPDATE feeds SET url=?, title=?, feed_author=?, feed_image=?, etag=NULL, last_modified=NULL, fail_count=0, next_fetch=0 WHERE id=?",
+                        (url, title, author, image, feed_id),
                     )
                 else:
-                    db.execute("UPDATE feeds SET title=? WHERE id=?", (title, feed_id))
+                    db.execute(
+                        "UPDATE feeds SET title=?, feed_author=?, feed_image=? WHERE id=?",
+                        (title, author, image, feed_id),
+                    )
                 db.commit()
             except sqlite3.IntegrityError:
                 return jsonify({"ok": False, "error": "A feed with that URL already exists."}), 409
 
             # Refresh entries after update.
             _update_one_feed_now(feed_id)
-            out = {"id": feed_id, "url": url, "title": title}
+            out = {"id": feed_id, "url": url, "title": title, "author": author, "image": image}
             return jsonify({"ok": True, "feed": out})
         finally:
             db.close()
@@ -1071,10 +1294,19 @@ def api_feed_retry():
             )
             db.commit()
             _update_one_feed_now(feed_id)
+
+            r = db.execute(
+                "SELECT id, url, title, fail_count, error_msg, last_ok FROM feeds WHERE id=?",
+                (feed_id,)
+            ).fetchone()
         finally:
             db.close()
 
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "feed": {
+        "id": r["id"], "url": r["url"], "title": r["title"],
+        "fail_count": int(r["fail_count"] or 0), "error_msg": r["error_msg"],
+        "last_ok": r["last_ok"],
+    }})
 
 
 @app.route("/api/stats")
