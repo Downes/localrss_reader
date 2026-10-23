@@ -1,0 +1,15 @@
+{
+  "slug": "news",
+  "title": "News",
+  "feeds": [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://www.theguardian.com/world/rss",
+    "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://rss.dw.com/rdf/rss-en-all",
+    "https://www.france24.com/en/rss",
+    "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
+    "https://www.cbc.ca/webfeed/rss/rss-topstories",
+    "https://feeds.feedburner.com/ndtvnews-top-stories",
+    "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
+  ]
+}

@@ -13,12 +13,20 @@ import io
 import json
 import xml.etree.ElementTree as ET
 import urllib.request
+import urllib.error
 from urllib.parse import urljoin
 from html.parser import HTMLParser
 
 import aiohttp
 import feedparser
 from flask import Flask, g, jsonify, request, send_from_directory, Response
+
+from admin_settings import (
+    SettingField,
+    init_settings_table,
+    get_setting,
+    register_admin_settings_routes,
+)
 
 # -----------------------
 # Config
@@ -124,6 +132,26 @@ INTERVAL_LOW = int(os.environ.get("RSS_INTERVAL_LOW", str(20 * 60)))
 INTERVAL_MED = int(os.environ.get("RSS_INTERVAL_MED", str(60 * 60)))
 INTERVAL_HIGH = int(os.environ.get("RSS_INTERVAL_HIGH", str(2 * 60 * 60)))
 
+# kvstore login gate: every route except "/", "/static/*", and "/api/collections*"
+# requires a Bearer token verified against the kvstore instance named in the
+# client's X-Kvstore-Url header (must be one of the allowed kvstore URLs, see
+# _allowed_kvstore_urls() below). RSS_ALLOWED_KVSTORE_URLS (.env) is the
+# fallback; an admin override saved via /admin/settings takes effect
+# immediately, no restart.
+RSS_ALLOWED_KVSTORE_URLS_DEFAULT = os.environ.get(
+    "RSS_ALLOWED_KVSTORE_URLS", "https://kvstore.mooc.ca,https://kvstore.downes.ca"
+)
+
+# Collections: predefined, file-based bundles of feeds harvested independently
+# of any personal DB and exposed read-only, unauthenticated, under /api/collections.
+COLLECTIONS_DIR = os.path.join(DB_DIR, "collections")
+COLLECTIONS_MANIFEST_DIR = os.path.join(COLLECTIONS_DIR, "manifests")
+
+# Admin-editable runtime settings live in their own DB file, independent of
+# the switchable personal DBs (rss.db, Podcasts.db, ...) — switching which
+# personal DB is "active" must never make admin settings appear to reset.
+ADMIN_SETTINGS_DB_PATH = os.path.join(DB_DIR, "admin_settings.db")
+
 # -----------------------
 # App
 # -----------------------
@@ -185,8 +213,20 @@ def connect_db() -> sqlite3.Connection:
             ) from e2
 
 
-def init_db():
-    con = connect_db()
+def connect_db_at(db_path: str) -> sqlite3.Connection:
+    """Connect directly to an explicit DB path, bypassing connect_db()'s
+    global active-DB state. Used for collection DBs, which are independent
+    files with no relationship to the personal "active" database."""
+    db_abs = os.path.abspath(db_path)
+    parent = os.path.dirname(db_abs)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+    con = sqlite3.connect(db_abs, timeout=SQLITE_TIMEOUT)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _apply_schema(con: sqlite3.Connection) -> None:
     con.executescript("""
     CREATE TABLE IF NOT EXISTS feeds (
       id INTEGER PRIMARY KEY,
@@ -222,32 +262,27 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_entries_feed_pub ON entries(feed_id, published);
     """)
     con.commit()
-    try:
-        con.execute("ALTER TABLE feeds ADD COLUMN error_msg TEXT")
-        con.commit()
-    except Exception:
-        pass
-    try:
-        con.execute("ALTER TABLE entries ADD COLUMN author TEXT")
-        con.commit()
-    except Exception:
-        pass
-    try:
-        con.execute("ALTER TABLE entries ADD COLUMN thumbnail TEXT")
-        con.commit()
-    except Exception:
-        pass
-    try:
-        con.execute("ALTER TABLE feeds ADD COLUMN feed_author TEXT")
-        con.commit()
-    except Exception:
-        pass
-    try:
-        con.execute("ALTER TABLE feeds ADD COLUMN feed_image TEXT")
-        con.commit()
-    except Exception:
-        pass
+    for stmt in (
+        "ALTER TABLE feeds ADD COLUMN error_msg TEXT",
+        "ALTER TABLE entries ADD COLUMN author TEXT",
+        "ALTER TABLE entries ADD COLUMN thumbnail TEXT",
+        "ALTER TABLE feeds ADD COLUMN feed_author TEXT",
+        "ALTER TABLE feeds ADD COLUMN feed_image TEXT",
+    ):
+        try:
+            con.execute(stmt)
+            con.commit()
+        except Exception:
+            pass
+
+
+def init_db():
+    con = connect_db()
+    _apply_schema(con)
     con.close()
+    settings_con = connect_db_at(ADMIN_SETTINGS_DB_PATH)
+    init_settings_table(settings_con)
+    settings_con.close()
 
 def _sanitize_db_name(name: str) -> str:
     # Keep only a conservative set of characters for filenames
@@ -393,14 +428,99 @@ def get_db():
         g.db = connect_db()
     return g.db
 
+def get_admin_settings_db() -> sqlite3.Connection:
+    if "admin_settings_db" not in g:
+        g.admin_settings_db = connect_db_at(ADMIN_SETTINGS_DB_PATH)
+    return g.admin_settings_db
+
 @app.teardown_appcontext
 def close_db(_exc):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+    admin_settings_db = g.pop("admin_settings_db", None)
+    if admin_settings_db is not None:
+        admin_settings_db.close()
 
 def ensure_feed(db, url: str):
     db.execute("INSERT OR IGNORE INTO feeds(url, next_fetch) VALUES(?, ?)", (url, 0))
+
+# -----------------------
+# Collections (public, unauthenticated, read-only feed bundles)
+# -----------------------
+# Serializes writes to collection DBs. Separate from DB_WRITE_LOCK since
+# collection DBs are different files with no real contention against the
+# personal DB.
+COLLECTIONS_WRITE_LOCK = threading.Lock()
+
+def _collection_db_path(slug: str) -> str:
+    return os.path.join(COLLECTIONS_DIR, f"{slug}.db")
+
+def _load_collection_manifests() -> list[dict]:
+    """Scan COLLECTIONS_MANIFEST_DIR for {"slug", "title", "feeds"} JSON files.
+    Skips and logs malformed manifests rather than failing the whole scan."""
+    manifests = []
+    try:
+        os.makedirs(COLLECTIONS_MANIFEST_DIR, exist_ok=True)
+        names = sorted(os.listdir(COLLECTIONS_MANIFEST_DIR))
+    except Exception as e:
+        print(f"[WARN] Could not scan collections manifest dir: {e}", file=sys.stderr)
+        return manifests
+
+    for name in names:
+        if not name.lower().endswith(".json"):
+            continue
+        path = os.path.join(COLLECTIONS_MANIFEST_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            slug = (data.get("slug") or "").strip()
+            title = (data.get("title") or "").strip()
+            feeds = data.get("feeds") or []
+            if not re.match(r"^[A-Za-z0-9_-]+$", slug):
+                print(f"[WARN] Collection manifest '{name}' has invalid/missing slug, skipping.", file=sys.stderr)
+                continue
+            if not title or not isinstance(feeds, list):
+                print(f"[WARN] Collection manifest '{name}' missing title or feeds list, skipping.", file=sys.stderr)
+                continue
+            manifests.append({
+                "slug": slug,
+                "title": title,
+                "feeds": [str(u).strip() for u in feeds if str(u).strip()],
+            })
+        except Exception as e:
+            print(f"[WARN] Could not load collection manifest '{name}': {e}", file=sys.stderr)
+    return manifests
+
+def _init_collection_db(db_path: str) -> None:
+    con = connect_db_at(db_path)
+    try:
+        _apply_schema(con)
+    finally:
+        con.close()
+
+def _sync_collection_feeds(db_path: str, feed_urls: list[str]) -> None:
+    """Add-only sync: ensures every feed in the manifest exists in the DB.
+    Never removes a feed, so a manifest temporarily dropping a URL doesn't
+    discard that feed's harvested history."""
+    con = connect_db_at(db_path)
+    try:
+        for url in feed_urls:
+            ensure_feed(con, url)
+        con.commit()
+    finally:
+        con.close()
+
+def ensure_collections() -> list[dict]:
+    """Idempotent: creates each collection's DB if missing and syncs its feed
+    list. Caller is responsible for holding COLLECTIONS_WRITE_LOCK."""
+    manifests = _load_collection_manifests()
+    for m in manifests:
+        db_path = _collection_db_path(m["slug"])
+        if not os.path.exists(db_path):
+            _init_collection_db(db_path)
+        _sync_collection_feeds(db_path, m["feeds"])
+    return manifests
 
 def stable_guid(entry) -> str:
     gid = entry.get("id") or entry.get("guid")
@@ -555,9 +675,10 @@ async def fetch_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, feed
         except Exception as e:
             return (feed_id, "exception", str(e), None, None)
 
-async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, cancel_event: threading.Event | None = None):
-    # IMPORTANT: callers should hold DB_WRITE_LOCK.
-    db = connect_db()
+async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, cancel_event: threading.Event | None = None, db_path: str | None = None):
+    # IMPORTANT: callers should hold DB_WRITE_LOCK (personal DB) or
+    # COLLECTIONS_WRITE_LOCK (db_path given) before calling this.
+    db = connect_db_at(db_path) if db_path else connect_db()
     cutoff = cutoff_ts()
 
     if feed_ids:
@@ -803,13 +924,138 @@ async def scheduler_loop():
         finally:
             DB_WRITE_LOCK.release()
 
+async def collections_scheduler_loop():
+    while True:
+        await asyncio.sleep(SCHEDULER_TICK_SECONDS)
+        acquired = COLLECTIONS_WRITE_LOCK.acquire(blocking=False)
+        if not acquired:
+            continue
+        try:
+            manifests = ensure_collections()
+            for m in manifests:
+                try:
+                    await update_feeds_async(only_due=True, db_path=_collection_db_path(m["slug"]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            COLLECTIONS_WRITE_LOCK.release()
+
 def start_background_scheduler():
     def runner():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.create_task(scheduler_loop())
+        loop.create_task(collections_scheduler_loop())
         loop.run_forever()
     threading.Thread(target=runner, daemon=True).start()
+
+# -----------------------
+# Auth (kvstore login gate)
+# -----------------------
+_PUBLIC_PATHS = {"/"}
+_PUBLIC_PATH_PREFIXES = ("/static/", "/api/collections")
+
+def _allowed_kvstore_urls() -> list[str]:
+    # Read fresh on every call so an admin override saved via /admin/settings
+    # takes effect immediately, no restart.
+    raw = get_setting(
+        get_admin_settings_db(), "RSS_ALLOWED_KVSTORE_URLS",
+        default=RSS_ALLOWED_KVSTORE_URLS_DEFAULT,
+    )
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+def verify_token(req) -> tuple[str | None, tuple[dict, int] | None]:
+    """Verify Bearer token against the kvstore instance named in the client's
+    X-Kvstore-Url header (must be one of _allowed_kvstore_urls()).
+    Returns (username, None) on success or (None, (body, status)) on failure."""
+    auth = req.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None, ({"error": "Missing or invalid Authorization header"}, 401)
+    token = auth[7:].strip()
+
+    kvstore_url = (req.headers.get("X-Kvstore-Url") or "").strip().rstrip("/")
+    if not kvstore_url or kvstore_url not in _allowed_kvstore_urls():
+        return None, ({"error": "Missing or disallowed X-Kvstore-Url header"}, 401)
+
+    verify_req = urllib.request.Request(
+        kvstore_url + "/auth/verify",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(verify_req, timeout=5) as resp:
+            if resp.status != 200:
+                return None, ({"error": "Invalid or expired token"}, 401)
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        return None, ({"error": "Invalid or expired token"}, 401)
+    except urllib.error.URLError as e:
+        return None, ({"error": f"KVStore unreachable: {e}"}, 502)
+    except Exception as e:
+        return None, ({"error": f"KVStore verify failed: {e}"}, 502)
+
+    username = (data or {}).get("username")
+    if not username:
+        return None, ({"error": "Invalid or expired token"}, 401)
+    return username, None
+
+@app.before_request
+def _enabled_gate():
+    # Runs before _require_auth below (Flask runs before_request hooks in
+    # registration order), so a disabled app answers 503 without first
+    # paying for a token-verify round trip to kvstore.
+    if request.path == "/admin/settings":
+        return None
+    if get_setting(get_admin_settings_db(), "ENABLED", default="true") == "false":
+        return jsonify({"error": "Service temporarily disabled by administrator"}), 503
+
+@app.before_request
+def _require_auth():
+    path = request.path
+    if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PATH_PREFIXES):
+        return None
+    username, err = verify_token(request)
+    if err:
+        body, status = err
+        return jsonify(body), status
+    g.username = username
+    return None
+
+# -----------------------
+# Admin settings
+# -----------------------
+# The global _require_auth before_request hook above already verifies the
+# Bearer token (including the X-Kvstore-Url allowlist check) for every
+# non-public path, /admin/settings included, and stashes the result on
+# g.username. So the callable handed to register_admin_settings_routes just
+# reuses that instead of re-verifying against kvstore a second time.
+def _admin_verify_token():
+    username = g.get("username")
+    if not username:
+        return None, ({"error": "Missing or invalid Authorization header"}, 401)
+    return username, None
+
+SETTINGS_SCHEMA = [
+    SettingField(
+        "ENABLED", "Enabled", "boolean", False, None,
+        "When off, this app's functional endpoints return 503. /admin/settings "
+        "stays reachable so you can turn it back on.",
+    ),
+    SettingField(
+        "RSS_ALLOWED_KVSTORE_URLS", "Allowed KVStore URLs", "text", False, None,
+        "Comma-separated kvstore instances allowed to issue tokens for this app "
+        "(checked against the client's X-Kvstore-Url header on every request).",
+    ),
+]
+SETTINGS_DEFAULTS = {
+    "ENABLED": "true",
+    "RSS_ALLOWED_KVSTORE_URLS": RSS_ALLOWED_KVSTORE_URLS_DEFAULT,
+}
+
+register_admin_settings_routes(
+    app, SETTINGS_SCHEMA, get_admin_settings_db, _admin_verify_token, SETTINGS_DEFAULTS
+)
 
 # -----------------------
 # Routes
@@ -857,6 +1103,73 @@ def fetch_feed():
         return jsonify({"ok": True, "title": feed_title, "feed_url": url, "items": items})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/collections")
+def api_collections():
+    """Public, unauthenticated: list available collections with feed counts."""
+    out = []
+    for m in _load_collection_manifests():
+        db_path = _collection_db_path(m["slug"])
+        feed_count = 0
+        if os.path.exists(db_path):
+            con = connect_db_at(db_path)
+            try:
+                row = con.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()
+                feed_count = int(row["c"] or 0)
+            finally:
+                con.close()
+        out.append({"slug": m["slug"], "title": m["title"], "feed_count": feed_count})
+    return jsonify(out)
+
+@app.route("/api/collections/<slug>/items")
+def api_collection_items(slug: str):
+    """Public, unauthenticated: items for one collection. Same shape as
+    /api/items but without bookmarked/read_at, since collections are
+    anonymous/shared with no personal read-state concept."""
+    if not re.match(r"^[A-Za-z0-9_-]+$", slug):
+        return jsonify({"error": "invalid slug"}), 404
+    db_path = _collection_db_path(slug)
+    if not os.path.exists(db_path):
+        return jsonify({"error": "collection not found"}), 404
+
+    limit = int(request.args.get("limit", "200"))
+    con = connect_db_at(db_path)
+    try:
+        cutoff = cutoff_ts()
+        rows = con.execute("""
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
+          FROM entries e
+          JOIN feeds f ON f.id = e.feed_id
+          WHERE e.published >= ?
+        """, (cutoff,)).fetchall()
+    finally:
+        con.close()
+
+    now = now_ts()
+    items = []
+    for r in rows:
+        pub = int(r["published"] or now)
+        mc = int(r["month_count"] or 0)
+        items.append({
+            "id": r["id"],
+            "feed_title": r["feed_title"] or "(untitled feed)",
+            "month_count": mc,
+            "feed_author": r["feed_author"] or None,
+            "feed_image": r["feed_image"] or None,
+            "title": r["title"] or "(no title)",
+            "link": r["link"],
+            "author": r["author"] or "",
+            "published": pub,
+            "content_html": r["content_html"] or "",
+            "thumbnail": r["thumbnail"] or None,
+            "_score": post_score(pub, mc, now),
+        })
+    items.sort(key=lambda x: x["_score"], reverse=True)
+    items = items[:limit]
+    for item in items:
+        del item["_score"]
+    return jsonify(items)
 
 @app.route("/api/items")
 def api_items():
@@ -1458,11 +1771,23 @@ def api_opml_import():
 
     return jsonify({"ok": True, "mode": mode, "imported": imported, "skipped": skipped, "db_path": ACTIVE_DB_PATH})
 
-# Run schema creation + migrations at import time (covers gunicorn and direct invocation)
+# Run schema creation + migrations, collections setup, and the background
+# scheduler at import time (covers gunicorn and direct invocation). This is
+# the real production startup path: under gunicorn, `if __name__ == "__main__"`
+# below never executes, since gunicorn imports this module rather than
+# running it as a script.
 try:
     init_db()
 except Exception as _e:
     print(f"[WARN] init_db failed at startup: {_e}", file=sys.stderr)
+
+try:
+    with COLLECTIONS_WRITE_LOCK:
+        ensure_collections()
+except Exception as _e:
+    print(f"[WARN] ensure_collections failed at startup: {_e}", file=sys.stderr)
+
+start_background_scheduler()
 
 
 def import_feeds_txt(path: str = "feeds.txt"):
@@ -1595,5 +1920,5 @@ if __name__ == "__main__":
     if _is_server_running("127.0.0.1", PORT):
         raise SystemExit(0)
 
-    start_background_scheduler()
+    # start_background_scheduler() already ran at module import time above.
     app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)

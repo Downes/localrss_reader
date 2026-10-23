@@ -429,15 +429,123 @@ button, input, select, textarea {
   }
 }
 
+/* Login overlay */
+.login-overlay{
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--app-bg);
+}
+
+.login-box{
+  width: 320px;
+  max-width: 90vw;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+
+.login-box h1{
+  font-size: 18px;
+  margin: 0 0 14px 0;
+  color: var(--text);
+}
+
+.login-box .row{
+  margin-bottom: 10px;
+}
+
+.login-box input:not([type="checkbox"]),
+.login-box select{
+  width: 100%;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: 5px 7px;
+  background: var(--app-bg);
+}
+
+.login-pw-row{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.login-pw-row input{ flex: 1; }
+
+.login-box button{
+  font-size: 13px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.login-box button.primary{
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  color: #fff;
+  border-color: var(--accent-2);
+  padding: 6px 14px;
+}
+
+.login-box button.primary:hover{ filter: brightness(1.05); }
+
+.login-box .io-actions{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.login-box .status-msg{
+  color: var(--danger);
+  font-size: 12px;
+}
+
 </style>
 </head>
 
 <body>
+  <div id="loginOverlay" class="login-overlay">
+    <div class="login-box">
+      <h1>Local RSS</h1>
+      <div class="row">
+        <label class="label label-strong" for="loginUsername">Username</label>
+        <input id="loginUsername" type="text" autocomplete="username" />
+      </div>
+      <div class="row">
+        <label class="label label-strong" for="loginPassword">Password</label>
+        <div class="login-pw-row">
+          <input id="loginPassword" type="password" autocomplete="current-password" />
+          <button id="loginPwToggle" type="button" title="Show/hide password">&#128065;</button>
+        </div>
+      </div>
+      <div class="row">
+        <label class="label" for="loginKvstoreUrl">Account server</label>
+        <select id="loginKvstoreUrl">
+          <option value="https://kvstore.mooc.ca">kvstore.mooc.ca</option>
+          <option value="https://kvstore.downes.ca">kvstore.downes.ca</option>
+        </select>
+      </div>
+      <div class="io-actions">
+        <button id="loginBtn" class="primary">Log in</button>
+        <span class="status-msg" id="loginStatus" aria-live="polite"></span>
+      </div>
+    </div>
+  </div>
+
   <div id="topnav">
     <button id="hamburger" class="hamburger" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" title="Menu">☰</button>
     <span class="pill" id="dbpath">DB: …</span>
     <span class="pill" id="counts2">…</span>
     <span id="status2"></span>
+    <span class="pill" id="loggedInUser" hidden></span>
+    <button id="logoutBtn" type="button" hidden title="Log out">Log out</button>
   </div>
   <div id="backdrop" class="sidebar-backdrop" aria-hidden="true" hidden></div>
 
@@ -601,6 +709,125 @@ let _openFeedEditor = null;
 let _refreshErrorFeeds = null;
 let _openSidebar = null;
 let _expandErrorFeeds = null;
+
+// ===== kvstore login =====
+const KVSTORE_URL_KEY = "localrss_kvstore_url";
+const TOKEN_KEY = "localrss_token";
+const USERNAME_KEY = "localrss_username";
+
+let authToken = localStorage.getItem(TOKEN_KEY);
+let authUsername = localStorage.getItem(USERNAME_KEY);
+let authKvstoreUrl = localStorage.getItem(KVSTORE_URL_KEY) || "https://kvstore.mooc.ca";
+
+const loginOverlay = document.querySelector("#loginOverlay");
+const loginUsernameEl = document.querySelector("#loginUsername");
+const loginPasswordEl = document.querySelector("#loginPassword");
+const loginKvstoreUrlEl = document.querySelector("#loginKvstoreUrl");
+const loginStatusEl = document.querySelector("#loginStatus");
+const loggedInUserEl = document.querySelector("#loggedInUser");
+const logoutBtnEl = document.querySelector("#logoutBtn");
+
+// Native fetch, captured before any override, so the override below can
+// still make real requests.
+const _nativeFetch = window.fetch.bind(window);
+
+function showLoggedOut() {
+  loginOverlay.hidden = false;
+  loggedInUserEl.hidden = true;
+  logoutBtnEl.hidden = true;
+  loginKvstoreUrlEl.value = authKvstoreUrl;
+}
+
+function showLoggedIn() {
+  loginOverlay.hidden = true;
+  loggedInUserEl.hidden = false;
+  loggedInUserEl.textContent = authUsername;
+  logoutBtnEl.hidden = false;
+  startApp();
+}
+
+// Same PBKDF2 derivation CList's kvstore.js uses for deriveAuthHash(): the
+// server only ever sees this hash, never the raw password.
+async function deriveAuthHash(password, uname) {
+  const enc = new TextEncoder();
+  const keyMaterial = await window.crypto.subtle.importKey(
+    "raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]
+  );
+  const bits = await window.crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode(uname + "_auth"), iterations: 100000, hash: "SHA-256" },
+    keyMaterial,
+    256
+  );
+  return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+document.querySelector("#loginPwToggle").onclick = () => {
+  loginPasswordEl.type = loginPasswordEl.type === "password" ? "text" : "password";
+};
+
+document.querySelector("#loginBtn").onclick = async () => {
+  const u = loginUsernameEl.value.trim().toLowerCase();
+  const p = loginPasswordEl.value;
+  loginStatusEl.textContent = "";
+  if (!u || !p) { loginStatusEl.textContent = "Username and password are required."; return; }
+
+  const kvUrl = loginKvstoreUrlEl.value;
+  const btn = document.querySelector("#loginBtn");
+  btn.disabled = true;
+  try {
+    const authHash = await deriveAuthHash(p, u);
+    const r = await _nativeFetch(`${kvUrl}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: u, auth_hash: authHash }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `Login failed (${r.status})`);
+    }
+    const data = await r.json();
+    authToken = data.token;
+    authUsername = data.username;
+    authKvstoreUrl = kvUrl;
+    localStorage.setItem(TOKEN_KEY, authToken);
+    localStorage.setItem(USERNAME_KEY, authUsername);
+    localStorage.setItem(KVSTORE_URL_KEY, authKvstoreUrl);
+    loginPasswordEl.value = "";
+    showLoggedIn();
+  } catch (e) {
+    loginStatusEl.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+logoutBtnEl.onclick = () => {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USERNAME_KEY);
+  authToken = null;
+  authUsername = null;
+  showLoggedOut();
+};
+
+// Attach kvstore auth headers to every same-origin /api/ or /fetch_feed call.
+// Public routes (/api/collections*) ignore the headers server-side, so this
+// is safe to send unconditionally and avoids touching every existing
+// fetch("/api/...") call site individually.
+window.fetch = function (input, init) {
+  const url = typeof input === "string" ? input : (input && input.url) || "";
+  const isApi = url.startsWith("/api/") || url.startsWith("/fetch_feed");
+  if (isApi) {
+    init = Object.assign({}, init);
+    init.headers = Object.assign({}, init.headers, {
+      Authorization: `Bearer ${authToken}`,
+      "X-Kvstore-Url": authKvstoreUrl,
+    });
+  }
+  return _nativeFetch(input, init).then((resp) => {
+    if (isApi && resp.status === 401) showLoggedOut();
+    return resp;
+  });
+};
 
 // Sidebar: start collapsed; hamburger toggles open/closed.
 // ===== Sidebar overlay (single-source-of-truth: body.sidebar-open) =====
@@ -1773,19 +2000,23 @@ function initErrorFeeds() {
   refresh();
 }
 
-// Sidebar wiring
-try { initSidebar(); } catch (e) { console.error("initSidebar failed", e); }
-try { initDbSelector(); } catch (e) { console.error("initDbSelector failed", e); }
-try { initFeedManager(); } catch (e) { console.error("initFeedManager failed", e); }
-try { initErrorFeeds(); } catch (e) { console.error("initErrorFeeds failed", e); }
+function startApp() {
+  // Sidebar wiring
+  try { initSidebar(); } catch (e) { console.error("initSidebar failed", e); }
+  try { initDbSelector(); } catch (e) { console.error("initDbSelector failed", e); }
+  try { initFeedManager(); } catch (e) { console.error("initFeedManager failed", e); }
+  try { initErrorFeeds(); } catch (e) { console.error("initErrorFeeds failed", e); }
 
-loadItems();
+  loadItems();
 
-// Populate DB pill on page load
-fetch("/api/config").then(r=>r.json()).then(c=>{
-  const el = document.querySelector("#dbpath");
-  if (el && c.db_path) el.textContent = "DB: " + c.db_path;
-}).catch(()=>{});
+  // Populate DB pill on page load
+  fetch("/api/config").then(r=>r.json()).then(c=>{
+    const el = document.querySelector("#dbpath");
+    if (el && c.db_path) el.textContent = "DB: " + c.db_path;
+  }).catch(()=>{});
+}
+
+if (authToken) showLoggedIn(); else showLoggedOut();
 
 </script>
 </body>

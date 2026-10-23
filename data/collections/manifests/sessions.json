@@ -1,0 +1,13 @@
+{
+  "slug": "sessions",
+  "title": "Sessions",
+  "feeds": [
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UC3I2GFN_F8WudD_2jUZbojA",
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UC4eYXhJI4-7wSWc8UNRwD4A",
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UCWgEWXnFFFeoXMJ766CfDLw",
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UC2Qw1dzXDBAZPwS7zm37g8g",
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UCWjmAUHmajb1-eo5WKk_22A",
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UCFAKGci5lneha2x4XMbzYrQ",
+    "https://www.youtube.com/feeds/videos.xml?channel_id=UC0yFbYmWHJT-6vSEne1XGdw"
+  ]
+}

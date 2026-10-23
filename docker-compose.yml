@@ -16,6 +16,7 @@ services:
     environment:
       - RSS_DB=/data/rss.db
       - RSS_PORT=8787
+      - ADMIN_USERNAMES=downes
     expose:
       - "8787"
     networks:

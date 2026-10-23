@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 # Copy application files
 COPY app.py .
+COPY admin_settings.py .
 COPY feeds.opml .
 COPY static/ static/
 

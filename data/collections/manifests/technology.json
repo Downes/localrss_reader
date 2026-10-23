@@ -1,0 +1,13 @@
+{
+  "slug": "technology",
+  "title": "Technology",
+  "feeds": [
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml",
+    "https://feeds.arstechnica.com/arstechnica/index",
+    "https://www.engadget.com/rss.xml",
+    "https://www.techmeme.com/feed.xml",
+    "https://www.techradar.com/feeds.xml",
+    "https://mashable.com/feeds/rss/all"
+  ]
+}
