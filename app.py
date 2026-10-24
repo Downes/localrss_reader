@@ -21,12 +21,13 @@ import aiohttp
 import feedparser
 from flask import Flask, g, jsonify, request, send_from_directory, Response
 
-from admin_settings import (
+from clist_server_admin.sqlite import (
     SettingField,
     init_settings_table,
     get_setting,
     register_admin_settings_routes,
 )
+from clist_kvstore_auth.sync import verify_token as _kv_verify_token
 
 # -----------------------
 # Config
@@ -133,14 +134,17 @@ INTERVAL_MED = int(os.environ.get("RSS_INTERVAL_MED", str(60 * 60)))
 INTERVAL_HIGH = int(os.environ.get("RSS_INTERVAL_HIGH", str(2 * 60 * 60)))
 
 # kvstore login gate: every route except "/", "/static/*", and "/api/collections*"
-# requires a Bearer token verified against the kvstore instance named in the
-# client's X-Kvstore-Url header (must be one of the allowed kvstore URLs, see
-# _allowed_kvstore_urls() below). RSS_ALLOWED_KVSTORE_URLS (.env) is the
-# fallback; an admin override saved via /admin/settings takes effect
-# immediately, no restart.
+# requires a Bearer token, verified locally via JWT/JWKS ("Pattern B", see
+# verify_identity() below) -- open to any issuer named in the token's own
+# `iss` claim, no allowlist. RSS_ALLOWED_KVSTORE_URLS (.env, overridable via
+# /admin/settings, see _allowed_kvstore_urls()) now only matters for (a) the
+# opaque/legacy-token fallback target (named by the client's X-Kvstore-Url
+# header) and (b) which issuer(s) are trusted to vouch for an ADMIN_USERNAMES
+# admin -- it no longer gates ordinary verification.
 RSS_ALLOWED_KVSTORE_URLS_DEFAULT = os.environ.get(
     "RSS_ALLOWED_KVSTORE_URLS", "https://kvstore.mooc.ca,https://kvstore.downes.ca"
 )
+ADMIN_USERNAMES = {u.strip() for u in os.environ.get("ADMIN_USERNAMES", "").split(",") if u.strip()}
 
 # Collections: predefined, file-based bundles of feeds harvested independently
 # of any personal DB and exposed read-only, unauthenticated, under /api/collections.
@@ -966,39 +970,30 @@ def _allowed_kvstore_urls() -> list[str]:
     )
     return [u.strip() for u in raw.split(",") if u.strip()]
 
-def verify_token(req) -> tuple[str | None, tuple[dict, int] | None]:
-    """Verify Bearer token against the kvstore instance named in the client's
-    X-Kvstore-Url header (must be one of _allowed_kvstore_urls()).
-    Returns (username, None) on success or (None, (body, status)) on failure."""
+def is_admin(identity) -> bool:
+    # Reimplemented locally rather than clist_kvstore_auth.sync.is_admin,
+    # because RSS_ALLOWED_KVSTORE_URLS is DB-overridable via /admin/settings
+    # (_allowed_kvstore_urls() below reads get_setting()), not just a static
+    # env var -- the package's own is_admin() only ever sees the env value.
+    return bool(identity) and identity.username in ADMIN_USERNAMES and identity.iss in _allowed_kvstore_urls()
+
+
+def verify_identity(req):
+    """Verify Bearer token via local JWT/JWKS ("Pattern B"), open to any
+    issuer named in the token's own `iss` claim -- no allowlist gates
+    whether a real JWT is accepted (clist_kvstore_auth.sync). Opaque/legacy
+    tokens carry no `iss`, so they still need the client's X-Kvstore-Url
+    header to say which instance to call back to verify against, and that
+    header must still be one of _allowed_kvstore_urls().
+    Returns (Identity, None) on success or (None, (body, status)) on failure."""
     auth = req.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return None, ({"error": "Missing or invalid Authorization header"}, 401)
-    token = auth[7:].strip()
-
-    kvstore_url = (req.headers.get("X-Kvstore-Url") or "").strip().rstrip("/")
-    if not kvstore_url or kvstore_url not in _allowed_kvstore_urls():
-        return None, ({"error": "Missing or disallowed X-Kvstore-Url header"}, 401)
-
-    verify_req = urllib.request.Request(
-        kvstore_url + "/auth/verify",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    try:
-        with urllib.request.urlopen(verify_req, timeout=5) as resp:
-            if resp.status != 200:
-                return None, ({"error": "Invalid or expired token"}, 401)
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError:
-        return None, ({"error": "Invalid or expired token"}, 401)
-    except urllib.error.URLError as e:
-        return None, ({"error": f"KVStore unreachable: {e}"}, 502)
-    except Exception as e:
-        return None, ({"error": f"KVStore verify failed: {e}"}, 502)
-
-    username = (data or {}).get("username")
-    if not username:
-        return None, ({"error": "Invalid or expired token"}, 401)
-    return username, None
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    if token.count(".") != 2:
+        kvstore_url = (req.headers.get("X-Kvstore-Url") or "").strip().rstrip("/")
+        if not kvstore_url or kvstore_url not in _allowed_kvstore_urls():
+            return None, ({"error": "Missing or disallowed X-Kvstore-Url header"}, 401)
+        return _kv_verify_token(auth, kvstore_url)
+    return _kv_verify_token(auth, "")
 
 @app.before_request
 def _enabled_gate():
@@ -1015,26 +1010,32 @@ def _require_auth():
     path = request.path
     if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PATH_PREFIXES):
         return None
-    username, err = verify_token(request)
+    identity, err = verify_identity(request)
     if err:
         body, status = err
         return jsonify(body), status
-    g.username = username
+    g.identity = identity
+    g.username = identity.username  # display-only; this app has no per-user ownership model
     return None
 
 # -----------------------
 # Admin settings
 # -----------------------
 # The global _require_auth before_request hook above already verifies the
-# Bearer token (including the X-Kvstore-Url allowlist check) for every
-# non-public path, /admin/settings included, and stashes the result on
-# g.username. So the callable handed to register_admin_settings_routes just
-# reuses that instead of re-verifying against kvstore a second time.
+# Bearer token for every non-public path, /admin/settings included, and
+# stashes the result on g.identity. The callable handed to
+# register_admin_settings_routes reuses that identity but additionally
+# gates on issuer-aware is_admin() itself -- not clist_server_admin.sqlite's
+# own bare is_admin(username) -- otherwise any issuer's JWT naming sub=<an
+# admin username> would bypass the issuer-trust requirement entirely, since
+# ordinary verification above is intentionally open to any issuer.
 def _admin_verify_token():
-    username = g.get("username")
-    if not username:
+    identity = g.get("identity")
+    if not identity:
         return None, ({"error": "Missing or invalid Authorization header"}, 401)
-    return username, None
+    if not is_admin(identity):
+        return None, ({"error": "Forbidden"}, 403)
+    return identity.username, None
 
 SETTINGS_SCHEMA = [
     SettingField(
@@ -1044,8 +1045,10 @@ SETTINGS_SCHEMA = [
     ),
     SettingField(
         "RSS_ALLOWED_KVSTORE_URLS", "Allowed KVStore URLs", "text", False, None,
-        "Comma-separated kvstore instances allowed to issue tokens for this app "
-        "(checked against the client's X-Kvstore-Url header on every request).",
+        "Comma-separated kvstore instances trusted to vouch for an admin, and used "
+        "as the opaque/legacy-token fallback target named by a client's "
+        "X-Kvstore-Url header. Does NOT gate ordinary token verification, which is "
+        "open to any issuer.",
     ),
 ]
 SETTINGS_DEFAULTS = {

@@ -1,3 +1,5 @@
 flask
 aiohttp
 feedparser
+clist-server-admin @ https://github.com/Downes/clist-server-admin/archive/55f5319b87fcf4073766a9f5e44d24a9a74cef60.tar.gz
+clist-kvstore-auth[sync] @ https://github.com/Downes/clist-kvstore-auth/archive/0b5b1b7bfffb08218cfe19176fa9db121de33394.tar.gz
