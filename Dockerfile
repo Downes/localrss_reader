@@ -15,7 +15,7 @@ COPY static/ static/
 RUN mkdir -p /data
 
 # Environment variables
-ENV RSS_DB=/data/rss.db
+ENV RSS_DB=/data/global.db
 ENV RSS_PORT=8787
 ENV FLASK_APP=app.py
 
@@ -23,4 +23,4 @@ ENV FLASK_APP=app.py
 EXPOSE 8787
 
 # Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:8787", "--workers", "1", "--timeout", "120", "--worker-class", "sync", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8787", "--workers", "2", "--timeout", "120", "--worker-class", "sync", "app:app"]

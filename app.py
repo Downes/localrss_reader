@@ -1,5 +1,6 @@
 import asyncio
 import calendar
+import fcntl
 import hashlib
 import re
 import os
@@ -32,94 +33,20 @@ from clist_kvstore_auth.sync import verify_token as _kv_verify_token
 # -----------------------
 # Config
 # -----------------------
-# RSS_DB is the "default" DB path. On startup, the app will scan the DB directory
-# for *.db files and select the most recently used DB (persisted), or otherwise
-# the first DB in the directory list.
-CONFIG_DB_PATH = os.environ.get("RSS_DB", "rss.db")
-DB_PATH = CONFIG_DB_PATH  # will be overridden by startup selection below
-DB_PATH_ABS = os.path.abspath(DB_PATH)
-ACTIVE_DB_PATH = DB_PATH_ABS
-
-DB_DIR = os.path.dirname(os.path.abspath(CONFIG_DB_PATH)) or os.path.abspath(".")
-LAST_DB_FILE = os.path.join(DB_DIR, ".localrss_last_db.json")
+# RSS_DB now points at the single global harvest-store DB file (see
+# "Architecture: Global Harvest Store + Per-Database Views" in CLAUDE.md).
+# There is no more per-request DB switching -- every identity's personal
+# feed lists ("databases") and the public collections all live as rows in
+# this one file.
+GLOBAL_DB_PATH = os.path.abspath(os.environ.get("RSS_DB", "data/global.db"))
+DB_DIR = os.path.dirname(GLOBAL_DB_PATH) or os.path.abspath(".")
 
 PORT = int(os.environ.get("RSS_PORT", "8787"))
-APP_VERSION = "0.4.15"
+APP_VERSION = "0.5.0"
 USER_AGENT = os.environ.get("RSS_UA", f"LocalRSSReader/{APP_VERSION} (+Windows; local)")
 MAX_CONCURRENCY = int(os.environ.get("RSS_CONCURRENCY", "40"))
 LIMIT_PER_HOST = int(os.environ.get("RSS_LIMIT_PER_HOST", "4"))
 
-
-def _scan_databases() -> list[str]:
-    try:
-        if not os.path.exists(DB_DIR):
-            os.makedirs(DB_DIR, exist_ok=True)
-    except Exception:
-        pass
-
-    dbs = []
-    try:
-        for name in os.listdir(DB_DIR):
-            if name.lower().endswith(".db") and os.path.isfile(os.path.join(DB_DIR, name)):
-                dbs.append(name)
-    except Exception:
-        return []
-    dbs.sort(key=lambda s: s.lower())
-    return dbs
-
-
-def _load_last_db_abs() -> str | None:
-    try:
-        if not os.path.exists(LAST_DB_FILE):
-            return None
-        with open(LAST_DB_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        p = (data or {}).get("last_db_abs")
-        if not p:
-            return None
-        return os.path.abspath(p)
-    except Exception:
-        return None
-
-
-def _save_last_db_abs(db_abs: str) -> None:
-    try:
-        tmp = {"last_db_abs": os.path.abspath(db_abs)}
-        with open(LAST_DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(tmp, f)
-    except Exception:
-        pass
-
-
-def _set_current_db_abs(db_abs: str) -> None:
-    """Set the app's current DB (absolute path) and persist as most recently used."""
-    global DB_PATH, DB_PATH_ABS, ACTIVE_DB_PATH
-    DB_PATH = os.path.abspath(db_abs)
-    DB_PATH_ABS = os.path.abspath(DB_PATH)
-    ACTIVE_DB_PATH = DB_PATH_ABS
-    _save_last_db_abs(DB_PATH_ABS)
-
-
-def _select_startup_db() -> None:
-    # candidate list comes from the configured DB directory
-    dbs = _scan_databases()
-    last_abs = _load_last_db_abs()
-    if last_abs:
-        last_name = os.path.basename(last_abs)
-        if last_name in dbs and os.path.abspath(os.path.join(DB_DIR, last_name)) == last_abs:
-            _set_current_db_abs(last_abs)
-            return
-
-    if dbs:
-        _set_current_db_abs(os.path.join(DB_DIR, dbs[0]))
-        return
-
-    # No *.db files in directory: keep configured default
-    _set_current_db_abs(os.path.abspath(CONFIG_DB_PATH))
-
-
-# Choose DB at import/startup time
-_select_startup_db()
 RETENTION_DAYS = int(os.environ.get("RSS_RETENTION_DAYS", "30"))
 
 # Feeds this broken are almost certainly dead/misconfigured - stop burning
@@ -146,14 +73,15 @@ RSS_ALLOWED_KVSTORE_URLS_DEFAULT = os.environ.get(
 )
 ADMIN_USERNAMES = {u.strip() for u in os.environ.get("ADMIN_USERNAMES", "").split(",") if u.strip()}
 
-# Collections: predefined, file-based bundles of feeds harvested independently
-# of any personal DB and exposed read-only, unauthenticated, under /api/collections.
+# Collections: predefined bundles of feeds, defined by manifest files on disk,
+# harvested into the same global store as everyone's personal feeds and
+# exposed read-only, unauthenticated, under /api/collections. A collection is
+# simply a `databases` row with owner_kvkey IS NULL.
 COLLECTIONS_DIR = os.path.join(DB_DIR, "collections")
 COLLECTIONS_MANIFEST_DIR = os.path.join(COLLECTIONS_DIR, "manifests")
 
 # Admin-editable runtime settings live in their own DB file, independent of
-# the switchable personal DBs (rss.db, Podcasts.db, ...) — switching which
-# personal DB is "active" must never make admin settings appear to reset.
+# the global harvest store.
 ADMIN_SETTINGS_DB_PATH = os.path.join(DB_DIR, "admin_settings.db")
 
 # -----------------------
@@ -170,57 +98,29 @@ def cutoff_ts(days: int = RETENTION_DAYS) -> int:
 # Serialize *all* write operations to avoid "database is locked"
 DB_WRITE_LOCK = threading.Lock()
 
-def connect_db() -> sqlite3.Connection:
-    """
-    Connect to SQLite database.
-    - Re-reads the persisted DB selection on every connect so all Gunicorn
-      workers stay in sync when the user switches databases.
-    - If RSS_DB points to a path whose directory doesn't exist, create it.
-    - If the path cannot be opened, fall back to a local rss.db next to app.py,
-      so the app stays up (with an empty/new DB) instead of crashing.
-    """
-    global ACTIVE_DB_PATH, DB_PATH, DB_PATH_ABS
-
-    # Re-read persisted selection so multi-worker Gunicorn stays in sync
-    last_abs = _load_last_db_abs()
-    if last_abs and os.path.exists(last_abs):
-        DB_PATH = last_abs
-        DB_PATH_ABS = last_abs
-        ACTIVE_DB_PATH = last_abs
-
-    db_abs = os.path.abspath(DB_PATH)
-    parent = os.path.dirname(db_abs)
+def connect_global() -> sqlite3.Connection:
+    """Connect to the single global harvest-store DB."""
+    parent = os.path.dirname(GLOBAL_DB_PATH)
     if parent and not os.path.exists(parent):
         try:
             os.makedirs(parent, exist_ok=True)
         except Exception as e:
             print(f"[WARN] Could not create DB directory '{parent}': {e}", file=sys.stderr)
-
-    try:
-        con = sqlite3.connect(db_abs, timeout=SQLITE_TIMEOUT)
-        ACTIVE_DB_PATH = db_abs
-        _save_last_db_abs(ACTIVE_DB_PATH)
-        con.row_factory = sqlite3.Row
-        return con
-    except Exception as e:
-        fallback_abs = os.path.abspath(os.path.join(os.path.dirname(__file__), "rss.db"))
-        try:
-            con = sqlite3.connect(fallback_abs, timeout=SQLITE_TIMEOUT)
-            ACTIVE_DB_PATH = fallback_abs
-            _save_last_db_abs(ACTIVE_DB_PATH)
-            con.row_factory = sqlite3.Row
-            print(f"[WARN] Could not open DB at '{db_abs}' ({e}). Falling back to '{fallback_abs}'.", file=sys.stderr)
-            return con
-        except Exception as e2:
-            raise RuntimeError(
-                f"Unable to open database file. Tried '{db_abs}' and fallback '{fallback_abs}'. Error: {e2}"
-            ) from e2
+    con = sqlite3.connect(GLOBAL_DB_PATH, timeout=SQLITE_TIMEOUT)
+    con.row_factory = sqlite3.Row
+    # WAL: readers never block behind the harvester's long-running write
+    # transaction (update_feeds_async holds one open for an entire fetch
+    # cycle). Without this, the default rollback-journal mode made every
+    # read -- Find, the feed list, mark-read/bookmark -- stall for up to
+    # SQLITE_TIMEOUT seconds whenever it landed during a harvest run.
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    return con
 
 
 def connect_db_at(db_path: str) -> sqlite3.Connection:
-    """Connect directly to an explicit DB path, bypassing connect_db()'s
-    global active-DB state. Used for collection DBs, which are independent
-    files with no relationship to the personal "active" database."""
+    """Connect directly to an explicit DB path. Used only for the
+    independent admin-settings DB file."""
     db_abs = os.path.abspath(db_path)
     parent = os.path.dirname(db_abs)
     if parent and not os.path.exists(parent):
@@ -231,6 +131,12 @@ def connect_db_at(db_path: str) -> sqlite3.Connection:
 
 
 def _apply_schema(con: sqlite3.Connection) -> None:
+    """Global Harvest Store + Per-Database Views schema (see CLAUDE.md).
+    `feeds`/`entries` are deduplicated globally; `databases` are named feed
+    lists (owned, or owner=NULL for public collections); `database_feeds` is
+    membership; `entry_status` is per-(database, entry) read/bookmark state;
+    `user_prefs` is each identity's "current database" (used when a request
+    omits ?db=)."""
     con.executescript("""
     CREATE TABLE IF NOT EXISTS feeds (
       id INTEGER PRIMARY KEY,
@@ -242,60 +148,95 @@ def _apply_schema(con: sqlite3.Connection) -> None:
       fail_count INTEGER DEFAULT 0,
       next_fetch INTEGER DEFAULT 0,
       month_count INTEGER DEFAULT 0,
-      last_ok INTEGER DEFAULT 0
+      last_ok INTEGER DEFAULT 0,
+      error_msg TEXT,
+      feed_author TEXT,
+      feed_image TEXT,
+      description TEXT
     );
 
     CREATE TABLE IF NOT EXISTS entries (
       id INTEGER PRIMARY KEY,
-      feed_id INTEGER NOT NULL,
+      feed_id INTEGER NOT NULL REFERENCES feeds(id),
       guid TEXT NOT NULL,
       title TEXT,
       link TEXT,
       author TEXT,
       published INTEGER,
       content_html TEXT,
-      read_at INTEGER,
-      bookmarked INTEGER DEFAULT 0,
+      thumbnail TEXT,
+      audio_url TEXT,
       created_at INTEGER NOT NULL,
-      UNIQUE(feed_id, guid),
-      FOREIGN KEY(feed_id) REFERENCES feeds(id)
+      UNIQUE(feed_id, guid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entries_feed_pub ON entries(feed_id, published);
+
+    CREATE TABLE IF NOT EXISTS databases (
+      id INTEGER PRIMARY KEY,
+      slug TEXT NOT NULL,
+      title TEXT,
+      owner_kvstore_url TEXT,
+      owner_kvkey TEXT,
+      created_at INTEGER NOT NULL,
+      CHECK ((owner_kvstore_url IS NULL) = (owner_kvkey IS NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_databases_public_slug
+        ON databases(slug) WHERE owner_kvkey IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_databases_owner_slug
+        ON databases(owner_kvstore_url, owner_kvkey, slug) WHERE owner_kvkey IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS database_feeds (
+      database_id INTEGER NOT NULL REFERENCES databases(id),
+      feed_id     INTEGER NOT NULL REFERENCES feeds(id),
+      added_at    INTEGER NOT NULL,
+      PRIMARY KEY (database_id, feed_id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_entries_unread ON entries(read_at);
-    CREATE INDEX IF NOT EXISTS idx_entries_bookmarked ON entries(bookmarked);
-    CREATE INDEX IF NOT EXISTS idx_entries_feed_pub ON entries(feed_id, published);
+    CREATE TABLE IF NOT EXISTS entry_status (
+      database_id INTEGER NOT NULL REFERENCES databases(id),
+      entry_id    INTEGER NOT NULL REFERENCES entries(id),
+      read_at     INTEGER,
+      bookmarked  INTEGER DEFAULT 0,
+      PRIMARY KEY (database_id, entry_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entry_status_db_read ON entry_status(database_id, read_at);
+    CREATE INDEX IF NOT EXISTS idx_entry_status_db_bookmarked ON entry_status(database_id, bookmarked);
+
+    CREATE TABLE IF NOT EXISTS user_prefs (
+      owner_kvstore_url TEXT NOT NULL,
+      owner_kvkey       TEXT NOT NULL,
+      database_id       INTEGER NOT NULL REFERENCES databases(id),
+      PRIMARY KEY (owner_kvstore_url, owner_kvkey)
+    );
     """)
     con.commit()
-    for stmt in (
-        "ALTER TABLE feeds ADD COLUMN error_msg TEXT",
-        "ALTER TABLE entries ADD COLUMN author TEXT",
-        "ALTER TABLE entries ADD COLUMN thumbnail TEXT",
-        "ALTER TABLE feeds ADD COLUMN feed_author TEXT",
-        "ALTER TABLE feeds ADD COLUMN feed_image TEXT",
-    ):
-        try:
-            con.execute(stmt)
-            con.commit()
-        except Exception:
-            pass
 
+
+def _ensure_column(con: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
+    """Idempotent ALTER TABLE ADD COLUMN, for additive schema changes to an
+    already-deployed DB file (CREATE TABLE IF NOT EXISTS above only helps on
+    a fresh DB)."""
+    try:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        con.commit()
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
 def init_db():
-    con = connect_db()
+    con = connect_global()
     _apply_schema(con)
+    _ensure_column(con, "entries", "audio_url", "TEXT")
+    _ensure_column(con, "feeds", "feed_author_did", "TEXT")
+    _ensure_column(con, "feeds", "description", "TEXT")
     con.close()
     settings_con = connect_db_at(ADMIN_SETTINGS_DB_PATH)
     init_settings_table(settings_con)
     settings_con.close()
 
-def _sanitize_db_name(name: str) -> str:
-    # Keep only a conservative set of characters for filenames
+def _sanitize_slug(name: str) -> str:
     name = (name or "").strip()
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-    if not name:
-        return ""
-    if not name.lower().endswith(".db"):
-        name += ".db"
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_")
     return name
 
 
@@ -419,7 +360,7 @@ def _build_opml(feeds):
         url = (f["url"] if isinstance(f, dict) else f[0]) or ""
         title = (f["title"] if isinstance(f, dict) else (f[1] if len(f) > 1 else None)) or url
         # minimal XML escaping
-        def esc(s): 
+        def esc(s):
             return (s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;"))
         parts.append(f'    <outline type="rss" text="{esc(title)}" title="{esc(title)}" xmlUrl="{esc(url)}" />')
     parts.append('  </body>')
@@ -429,7 +370,7 @@ def _build_opml(feeds):
 
 def get_db():
     if "db" not in g:
-        g.db = connect_db()
+        g.db = connect_global()
     return g.db
 
 def get_admin_settings_db() -> sqlite3.Connection:
@@ -449,16 +390,21 @@ def close_db(_exc):
 def ensure_feed(db, url: str):
     db.execute("INSERT OR IGNORE INTO feeds(url, next_fetch) VALUES(?, ?)", (url, 0))
 
+def _ensure_global_feed(db, url: str, title: str | None = None) -> int:
+    """Dedupe-by-url lookup-or-create against the global feeds table."""
+    row = db.execute("SELECT id FROM feeds WHERE url=?", (url,)).fetchone()
+    if row:
+        return row["id"]
+    cur = db.execute("INSERT INTO feeds(url, title, next_fetch) VALUES(?, ?, 0)", (url, title))
+    return cur.lastrowid
+
 # -----------------------
 # Collections (public, unauthenticated, read-only feed bundles)
 # -----------------------
-# Serializes writes to collection DBs. Separate from DB_WRITE_LOCK since
-# collection DBs are different files with no real contention against the
-# personal DB.
+# Serializes collection-membership writes (ensure_collections). Separate
+# from DB_WRITE_LOCK only to keep manifest-sync concerns distinct; both
+# ultimately touch the same global DB file.
 COLLECTIONS_WRITE_LOCK = threading.Lock()
-
-def _collection_db_path(slug: str) -> str:
-    return os.path.join(COLLECTIONS_DIR, f"{slug}.db")
 
 def _load_collection_manifests() -> list[dict]:
     """Scan COLLECTIONS_MANIFEST_DIR for {"slug", "title", "feeds"} JSON files.
@@ -496,34 +442,38 @@ def _load_collection_manifests() -> list[dict]:
             print(f"[WARN] Could not load collection manifest '{name}': {e}", file=sys.stderr)
     return manifests
 
-def _init_collection_db(db_path: str) -> None:
-    con = connect_db_at(db_path)
-    try:
-        _apply_schema(con)
-    finally:
-        con.close()
-
-def _sync_collection_feeds(db_path: str, feed_urls: list[str]) -> None:
-    """Add-only sync: ensures every feed in the manifest exists in the DB.
-    Never removes a feed, so a manifest temporarily dropping a URL doesn't
-    discard that feed's harvested history."""
-    con = connect_db_at(db_path)
-    try:
-        for url in feed_urls:
-            ensure_feed(con, url)
-        con.commit()
-    finally:
-        con.close()
-
 def ensure_collections() -> list[dict]:
-    """Idempotent: creates each collection's DB if missing and syncs its feed
-    list. Caller is responsible for holding COLLECTIONS_WRITE_LOCK."""
+    """Idempotent: ensures each collection's `databases` row (owner=NULL)
+    exists and its feed list is synced, add-only (never removes a feed from
+    a collection, so a manifest temporarily dropping a URL doesn't discard
+    that feed's harvested history). Caller is responsible for holding
+    COLLECTIONS_WRITE_LOCK."""
     manifests = _load_collection_manifests()
-    for m in manifests:
-        db_path = _collection_db_path(m["slug"])
-        if not os.path.exists(db_path):
-            _init_collection_db(db_path)
-        _sync_collection_feeds(db_path, m["feeds"])
+    db = connect_global()
+    try:
+        for m in manifests:
+            row = db.execute(
+                "SELECT id FROM databases WHERE owner_kvkey IS NULL AND slug=?", (m["slug"],)
+            ).fetchone()
+            if row:
+                database_id = row["id"]
+                db.execute("UPDATE databases SET title=? WHERE id=?", (m["title"], database_id))
+            else:
+                cur = db.execute(
+                    "INSERT INTO databases (slug, title, owner_kvstore_url, owner_kvkey, created_at) "
+                    "VALUES (?, ?, NULL, NULL, ?)",
+                    (m["slug"], m["title"], now_ts()),
+                )
+                database_id = cur.lastrowid
+            for url in m["feeds"]:
+                feed_id = _ensure_global_feed(db, url)
+                db.execute(
+                    "INSERT OR IGNORE INTO database_feeds (database_id, feed_id, added_at) VALUES (?, ?, ?)",
+                    (database_id, feed_id, now_ts()),
+                )
+        db.commit()
+    finally:
+        db.close()
     return manifests
 
 def stable_guid(entry) -> str:
@@ -598,6 +548,15 @@ def entry_thumbnail(entry) -> str | None:
         return image.get("href")
     return None
 
+def entry_audio(entry) -> str | None:
+    """First audio enclosure on this entry (podcast episode media), or None
+    for a plain article. Only looks at data feedparser already parsed from
+    the feed, no extra fetch -- mirrors entry_thumbnail() above."""
+    for enc in (entry.get("enclosures") or []):
+        if (enc.get("type") or "").startswith("audio/") and enc.get("href"):
+            return enc.get("href")
+    return None
+
 def feed_level_author(feed) -> str | None:
     """Best-effort feed-supplied author name: Atom/RSS author, iTunes
     podcast author, or publisher - in that order."""
@@ -612,6 +571,31 @@ def feed_level_author(feed) -> str | None:
         return publisher
     return None
 
+def feed_level_author_did(parsed) -> str | None:
+    """Best-effort did:web DID advertised by the feed: an entry-level
+    rel="author" link or Atom author URI (checked across entries first --
+    more specific, correct for multi-author feeds), falling back to the
+    same at channel level. Takes the full feedparser.parse() result (needs
+    both .entries and .feed)."""
+    for entry in parsed.entries:
+        for link in (entry.get("links") or []):
+            href = link.get("href", "")
+            if link.get("rel") == "author" and href.startswith("did:"):
+                return href
+        detail = entry.get("author_detail") or {}
+        href = detail.get("href", "")
+        if href.startswith("did:"):
+            return href
+    for link in (parsed.feed.get("links") or []):
+        href = link.get("href", "")
+        if link.get("rel") == "author" and href.startswith("did:"):
+            return href
+    detail = parsed.feed.get("author_detail") or {}
+    href = detail.get("href", "")
+    if href.startswith("did:"):
+        return href
+    return None
+
 def feed_level_image(feed) -> str | None:
     """Best-effort feed-supplied image/thumbnail: RSS <image>, iTunes
     podcast artwork, or Atom logo/icon - in that order."""
@@ -624,6 +608,20 @@ def feed_level_image(feed) -> str | None:
     icon = (feed.get("icon") or "").strip()
     if icon:
         return icon
+    return None
+
+def feed_level_description(feed) -> str | None:
+    """Best-effort feed-supplied description: RSS <description>, Atom
+    <subtitle>, or <summary> - in that order."""
+    desc = (feed.get("description") or "").strip()
+    if desc:
+        return desc
+    subtitle = (feed.get("subtitle") or "").strip()
+    if subtitle:
+        return subtitle
+    summary = (feed.get("summary") or "").strip()
+    if summary:
+        return summary
     return None
 
 def recompute_month_count(db, feed_id: int, cutoff: int):
@@ -679,10 +677,9 @@ async def fetch_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, feed
         except Exception as e:
             return (feed_id, "exception", str(e), None, None)
 
-async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, cancel_event: threading.Event | None = None, db_path: str | None = None):
-    # IMPORTANT: callers should hold DB_WRITE_LOCK (personal DB) or
-    # COLLECTIONS_WRITE_LOCK (db_path given) before calling this.
-    db = connect_db_at(db_path) if db_path else connect_db()
+async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, cancel_event: threading.Event | None = None):
+    # IMPORTANT: callers should hold DB_WRITE_LOCK before calling this.
+    db = connect_global()
     cutoff = cutoff_ts()
 
     if feed_ids:
@@ -755,14 +752,18 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                         parsed = feedparser.parse(payload)
                         feed_title = (parsed.feed.get("title") or "").strip() or None
                         f_author = feed_level_author(parsed.feed)
+                        f_author_did = feed_level_author_did(parsed)
                         f_image = feed_level_image(parsed.feed)
+                        f_description = feed_level_description(parsed.feed)
                         db.execute(
                             """UPDATE feeds SET title=COALESCE(?, title),
                                  feed_author=COALESCE(feed_author, ?),
+                                 feed_author_did=COALESCE(feed_author_did, ?),
                                  feed_image=COALESCE(feed_image, ?),
+                                 description=COALESCE(description, ?),
                                  etag=?, last_modified=?, last_fetch=?, last_ok=?, fail_count=0, error_msg=NULL
                                WHERE id=?""",
-                            (feed_title, f_author, f_image, etag, last_mod, now_ts(), now_ts(), feed_id)
+                            (feed_title, f_author, f_author_did, f_image, f_description, etag, last_mod, now_ts(), now_ts(), feed_id)
                         )
 
                         added_any = False
@@ -779,10 +780,11 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                                     continue
                                 html = entry_content_html(e)
                                 thumb = entry_thumbnail(e)
+                                audio = entry_audio(e)
                                 cur_ins = db.execute("""
-                                  INSERT OR IGNORE INTO entries(feed_id,guid,title,link,author,published,content_html,thumbnail,created_at)
-                                  VALUES(?,?,?,?,?,?,?,?,?)
-                                """, (feed_id, guid, title, link, author, pub_ts, html, thumb, now_ts()))
+                                  INSERT OR IGNORE INTO entries(feed_id,guid,title,link,author,published,content_html,thumbnail,audio_url,created_at)
+                                  VALUES(?,?,?,?,?,?,?,?,?,?)
+                                """, (feed_id, guid, title, link, author, pub_ts, html, thumb, audio, now_ts()))
                                 if cur_ins.rowcount:
                                     added_any = True
                             except Exception:
@@ -803,7 +805,17 @@ async def update_feeds_async(feed_ids=None, only_due=True, progress_cb=None, can
                 if progress_cb:
                     progress_cb(total=total, checked=checked, updated=updated, errors=errors, state="running", current_url=cur_url)
 
-        db.execute("DELETE FROM entries WHERE published < ? AND bookmarked = 0", (cutoff,))
+        # Retention: an entry is purged once past cutoff, unless some database
+        # has it bookmarked. Drop its entry_status rows too so none orphan.
+        to_delete = [r["id"] for r in db.execute(
+            "SELECT id FROM entries WHERE published < ? AND id NOT IN "
+            "(SELECT entry_id FROM entry_status WHERE bookmarked = 1)",
+            (cutoff,),
+        ).fetchall()]
+        if to_delete:
+            placeholders = ",".join("?" * len(to_delete))
+            db.execute(f"DELETE FROM entry_status WHERE entry_id IN ({placeholders})", to_delete)
+            db.execute(f"DELETE FROM entries WHERE id IN ({placeholders})", to_delete)
         db.commit()
     except Exception:
         db.rollback()
@@ -911,9 +923,14 @@ def _any_update_job_running() -> bool:
 # -----------------------
 # Background scheduler
 # -----------------------
+# One unified loop over the global, deduplicated feeds table -- a feed is
+# harvested once regardless of how many personal databases or collections
+# reference it. Replaces the old scheduler_loop()/collections_scheduler_loop()
+# split, which existed only because collections used to live in separate DB
+# files.
 _scheduler_enabled = True
 
-async def scheduler_loop():
+async def harvest_loop():
     while True:
         await asyncio.sleep(SCHEDULER_TICK_SECONDS)
         if not _scheduler_enabled:
@@ -922,43 +939,49 @@ async def scheduler_loop():
         if not acquired:
             continue
         try:
+            with COLLECTIONS_WRITE_LOCK:
+                ensure_collections()
             await update_feeds_async(only_due=True)
         except Exception:
             pass
         finally:
             DB_WRITE_LOCK.release()
 
-async def collections_scheduler_loop():
-    while True:
-        await asyncio.sleep(SCHEDULER_TICK_SECONDS)
-        acquired = COLLECTIONS_WRITE_LOCK.acquire(blocking=False)
-        if not acquired:
-            continue
-        try:
-            manifests = ensure_collections()
-            for m in manifests:
-                try:
-                    await update_feeds_async(only_due=True, db_path=_collection_db_path(m["slug"]))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        finally:
-            COLLECTIONS_WRITE_LOCK.release()
+# With more than one gunicorn worker process, module-level code (including this
+# function) runs once per worker. An flock on a sentinel file in the bind-mounted
+# data dir elects exactly one worker as the harvester -- the others skip starting
+# it entirely, so feeds are never fetched twice in parallel. The fd is kept open
+# in a module global for the life of the process; the OS releases the lock
+# automatically if that worker dies, letting another worker pick it up.
+_scheduler_leader_fh = None
+
+def _acquire_scheduler_leadership() -> bool:
+    global _scheduler_leader_fh
+    lock_path = os.path.join(os.path.dirname(GLOBAL_DB_PATH), ".harvester.lock")
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    _scheduler_leader_fh = fh  # keep open/locked for process lifetime
+    return True
 
 def start_background_scheduler():
+    if not _acquire_scheduler_leadership():
+        print("[INFO] Another worker already owns the harvester; not starting it here.", file=sys.stderr)
+        return
     def runner():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.create_task(scheduler_loop())
-        loop.create_task(collections_scheduler_loop())
+        loop.create_task(harvest_loop())
         loop.run_forever()
     threading.Thread(target=runner, daemon=True).start()
 
 # -----------------------
 # Auth (kvstore login gate)
 # -----------------------
-_PUBLIC_PATHS = {"/"}
+_PUBLIC_PATHS = {"/", "/feed_meta"}
 _PUBLIC_PATH_PREFIXES = ("/static/", "/api/collections")
 
 def _allowed_kvstore_urls() -> list[str]:
@@ -995,6 +1018,43 @@ def verify_identity(req):
         return _kv_verify_token(auth, kvstore_url)
     return _kv_verify_token(auth, "")
 
+# -----------------------
+# CORS for local runs
+# -----------------------
+# The *hosted* instance never needs any of this -- its CORS headers all come
+# from the Caddy block in front of it. A bare local run (run_localrss.sh/.bat,
+# the tray app, or `docker compose up` with nothing in front) has no reverse
+# proxy adding those headers at all, so without this, no browser page --
+# hosted CList, the desktop launcher, or file:// -- could ever fetch() it.
+def _is_local_host_request() -> bool:
+    host = (request.host or "").split(":")[0]
+    return host in ("localhost", "127.0.0.1")
+
+@app.before_request
+def _local_cors_preflight():
+    # Must run before _enabled_gate/_require_auth below: a preflight OPTIONS
+    # carries no Authorization header, and browsers require a 2xx preflight
+    # response before they'll even send the real request.
+    if request.method == "OPTIONS" and _is_local_host_request():
+        resp = Response(status=204)
+        origin = request.headers.get("Origin")
+        if origin:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Kvstore-Url"
+        return resp
+    return None
+
+@app.after_request
+def _local_cors_headers(response):
+    if _is_local_host_request():
+        origin = request.headers.get("Origin")
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
 @app.before_request
 def _enabled_gate():
     # Runs before _require_auth below (Flask runs before_request hooks in
@@ -1015,7 +1075,7 @@ def _require_auth():
         body, status = err
         return jsonify(body), status
     g.identity = identity
-    g.username = identity.username  # display-only; this app has no per-user ownership model
+    g.username = identity.username
     return None
 
 # -----------------------
@@ -1059,6 +1119,119 @@ SETTINGS_DEFAULTS = {
 register_admin_settings_routes(
     app, SETTINGS_SCHEMA, get_admin_settings_db, _admin_verify_token, SETTINGS_DEFAULTS
 )
+
+# -----------------------
+# Database resolution (ownership, slugs, per-identity preference)
+# -----------------------
+# A "database" row is a named feed list: owned (owner_kvstore_url +
+# owner_kvkey set) or public/collection-style (both NULL). Reads and writes
+# against an owned database both require the caller's identity to match the
+# owner -- a mismatch resolves as "not found" (get_database_by_slug only
+# ever looks up *this* caller's own owned rows), not a 403 that would leak
+# the database's existence to a non-owner.
+
+def _requested_db_slug() -> str | None:
+    slug = (request.args.get("db") or "").strip()
+    if slug:
+        return slug
+    body = request.get_json(silent=True) or {}
+    slug = (body.get("db") or "").strip()
+    return slug or None
+
+
+def get_database_by_slug(db, slug: str, identity):
+    """A caller's own owned database wins over a public/collection one of
+    the same slug, so an identity's personal list always takes priority
+    over a same-named public collection."""
+    if identity:
+        row = db.execute(
+            "SELECT * FROM databases WHERE owner_kvstore_url=? AND owner_kvkey=? AND slug=?",
+            (identity.iss, identity.username, slug),
+        ).fetchone()
+        if row:
+            return row
+    return db.execute(
+        "SELECT * FROM databases WHERE owner_kvkey IS NULL AND slug=?", (slug,)
+    ).fetchone()
+
+
+def resolve_database(db, identity, slug: str | None = None, for_write: bool = False):
+    """Returns (database_row, None) or (None, (response, status)).
+    No slug: falls back to the identity's user_prefs row, or -- if that
+    identity owns exactly one database and has never picked one -- that
+    single database (so a fresh identity with one personal feed list
+    doesn't have to explicitly select it first)."""
+    if slug:
+        row = get_database_by_slug(db, slug, identity)
+        if not row:
+            return None, (jsonify({"ok": False, "error": f"Unknown database: {slug}"}), 404)
+    else:
+        if not identity:
+            return None, (jsonify({"ok": False, "error": "db required"}), 400)
+        pref = db.execute(
+            "SELECT database_id FROM user_prefs WHERE owner_kvstore_url=? AND owner_kvkey=?",
+            (identity.iss, identity.username),
+        ).fetchone()
+        if pref:
+            row = db.execute("SELECT * FROM databases WHERE id=?", (pref["database_id"],)).fetchone()
+            if not row:
+                return None, (jsonify({"ok": False, "error": "Current database no longer exists."}), 404)
+        else:
+            owned = db.execute(
+                "SELECT * FROM databases WHERE owner_kvstore_url=? AND owner_kvkey=?",
+                (identity.iss, identity.username),
+            ).fetchall()
+            if len(owned) == 1:
+                row = owned[0]
+            elif len(owned) == 0:
+                return None, (jsonify({"ok": False, "error": "No databases yet. Import an OPML file to create one."}), 400)
+            else:
+                return None, (jsonify({"ok": False, "error": "Multiple databases exist; pass ?db=<slug> or select one."}), 400)
+
+    if for_write and row["owner_kvkey"] is None:
+        return None, (jsonify({"ok": False, "error": "This database is read-only."}), 403)
+    return row, None
+
+
+def _entry_in_database(db, database_id: int, entry_id: int) -> bool:
+    return db.execute(
+        "SELECT 1 FROM entries e JOIN database_feeds df "
+        "ON df.feed_id = e.feed_id AND df.database_id = ? WHERE e.id = ?",
+        (database_id, entry_id),
+    ).fetchone() is not None
+
+
+def _load_statuses(db, database_id: int, entry_ids: list[int]) -> dict:
+    if not entry_ids:
+        return {}
+    placeholders = ",".join("?" * len(entry_ids))
+    rows = db.execute(
+        f"SELECT entry_id, read_at, bookmarked FROM entry_status "
+        f"WHERE database_id=? AND entry_id IN ({placeholders})",
+        (database_id, *entry_ids),
+    ).fetchall()
+    return {r["entry_id"]: (r["read_at"], r["bookmarked"]) for r in rows}
+
+
+def _item_dict(r, status) -> dict:
+    read_at, bookmarked = status or (None, 0)
+    return {
+        "id": r["id"],
+        "feed_title": r["feed_title"] or "(untitled feed)",
+        "month_count": int(r["month_count"] or 0),
+        "feed_author": r["feed_author"] or None,
+        "feed_image": r["feed_image"] or None,
+        "feed_url": r["feed_url"] or None,
+        "title": r["title"] or "(no title)",
+        "link": r["link"],
+        "author": r["author"] or "",
+        "published": int(r["published"] or now_ts()),
+        "content_html": r["content_html"] or "",
+        "thumbnail": r["thumbnail"] or None,
+        "audio_url": r["audio_url"] or None,
+        "bookmarked": int(bookmarked or 0),
+        "read_at": read_at,
+    }
 
 # -----------------------
 # Routes
@@ -1107,20 +1280,47 @@ def fetch_feed():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/feed_meta", methods=["GET"])
+def feed_meta():
+    """Public, no auth: return a feed's title and author_did without its
+    items. Used by CList's Annotations "follow this author" feature
+    (js/annotate.js) to resolve a DID from a feed URL, whether or not this
+    instance already tracks that feed.
+    Fast path: already-harvested feeds return their stored feed_author_did
+    (computed at harvest time, see feed_level_author_did() above) with no
+    live fetch. Otherwise falls back to a live parse, same as /fetch_feed."""
+    url = (request.args.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "url required"}), 400
+
+    db = connect_global()
+    row = db.execute("SELECT title, feed_author_did FROM feeds WHERE url=?", (url,)).fetchone()
+    db.close()
+    if row and row["feed_author_did"]:
+        return jsonify({"ok": True, "title": row["title"], "author_did": row["feed_author_did"]})
+
+    try:
+        parsed = feedparser.parse(url)
+        title = (parsed.feed.get("title") or "").strip() or (row["title"] if row else None)
+        author_did = feed_level_author_did(parsed)
+        return jsonify({"ok": True, "title": title, "author_did": author_did})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route("/api/collections")
 def api_collections():
     """Public, unauthenticated: list available collections with feed counts."""
+    db = get_db()
     out = []
     for m in _load_collection_manifests():
-        db_path = _collection_db_path(m["slug"])
+        row = db.execute(
+            "SELECT id FROM databases WHERE owner_kvkey IS NULL AND slug=?", (m["slug"],)
+        ).fetchone()
         feed_count = 0
-        if os.path.exists(db_path):
-            con = connect_db_at(db_path)
-            try:
-                row = con.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()
-                feed_count = int(row["c"] or 0)
-            finally:
-                con.close()
+        if row:
+            feed_count = db.execute(
+                "SELECT COUNT(*) AS c FROM database_feeds WHERE database_id=?", (row["id"],)
+            ).fetchone()["c"]
         out.append({"slug": m["slug"], "title": m["title"], "feed_count": feed_count})
     return jsonify(out)
 
@@ -1131,23 +1331,28 @@ def api_collection_items(slug: str):
     anonymous/shared with no personal read-state concept."""
     if not re.match(r"^[A-Za-z0-9_-]+$", slug):
         return jsonify({"error": "invalid slug"}), 404
-    db_path = _collection_db_path(slug)
-    if not os.path.exists(db_path):
+
+    db = get_db()
+    row = db.execute("SELECT id FROM databases WHERE owner_kvkey IS NULL AND slug=?", (slug,)).fetchone()
+    if not row:
         return jsonify({"error": "collection not found"}), 404
+    database_id = row["id"]
 
     limit = int(request.args.get("limit", "200"))
-    con = connect_db_at(db_path)
-    try:
-        cutoff = cutoff_ts()
-        rows = con.execute("""
-          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail,
-                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
-          FROM entries e
-          JOIN feeds f ON f.id = e.feed_id
-          WHERE e.published >= ?
-        """, (cutoff,)).fetchall()
-    finally:
-        con.close()
+    feed_ids = [r["feed_id"] for r in db.execute(
+        "SELECT feed_id FROM database_feeds WHERE database_id=?", (database_id,)
+    ).fetchall()]
+    if not feed_ids:
+        return jsonify([])
+    placeholders = ",".join("?" * len(feed_ids))
+    cutoff = cutoff_ts()
+    rows = db.execute(f"""
+      SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.audio_url,
+             f.title AS feed_title, f.month_count, f.feed_author, f.feed_image, f.url AS feed_url
+      FROM entries e
+      JOIN feeds f ON f.id = e.feed_id
+      WHERE e.feed_id IN ({placeholders}) AND e.published >= ?
+    """, (*feed_ids, cutoff)).fetchall()
 
     now = now_ts()
     items = []
@@ -1160,12 +1365,14 @@ def api_collection_items(slug: str):
             "month_count": mc,
             "feed_author": r["feed_author"] or None,
             "feed_image": r["feed_image"] or None,
+            "feed_url": r["feed_url"] or None,
             "title": r["title"] or "(no title)",
             "link": r["link"],
             "author": r["author"] or "",
             "published": pub,
             "content_html": r["content_html"] or "",
             "thumbnail": r["thumbnail"] or None,
+            "audio_url": r["audio_url"] or None,
             "_score": post_score(pub, mc, now),
         })
     items.sort(key=lambda x: x["_score"], reverse=True)
@@ -1177,122 +1384,94 @@ def api_collection_items(slug: str):
 @app.route("/api/items")
 def api_items():
     limit = int(request.args.get("limit", "1600"))
+    offset = int(request.args.get("offset", "0"))
     db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug())
+    if err:
+        return err
+    database_id = database["id"]
 
-    feed_id = request.args.get("feed_id")
-    if feed_id:
+    feed_ids = [r["feed_id"] for r in db.execute(
+        "SELECT feed_id FROM database_feeds WHERE database_id=?", (database_id,)
+    ).fetchall()]
+    if not feed_ids:
+        return jsonify([])
+    feed_id_placeholders = ",".join("?" * len(feed_ids))
+
+    feed_id_param = request.args.get("feed_id")
+    if feed_id_param:
         # Full history for one feed - ignores retention cutoff and read state,
         # since the point is to see everything stored, not the reading queue.
+        fid = int(feed_id_param)
+        if fid not in feed_ids:
+            return jsonify({"ok": False, "error": "Feed is not in this database"}), 404
         rows = db.execute("""
-          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.bookmarked, e.read_at,
-                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
-          FROM entries e
-          JOIN feeds f ON f.id = e.feed_id
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.audio_url,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image, f.url AS feed_url
+          FROM entries e JOIN feeds f ON f.id = e.feed_id
           WHERE e.feed_id = ?
-          ORDER BY e.published DESC
-          LIMIT ?
-        """, (int(feed_id), limit)).fetchall()
-        return jsonify([{
-            "id": r["id"],
-            "feed_title": r["feed_title"] or "(untitled feed)",
-            "month_count": int(r["month_count"] or 0),
-            "feed_author": r["feed_author"] or None,
-            "feed_image": r["feed_image"] or None,
-            "title": r["title"] or "(no title)",
-            "link": r["link"],
-            "author": r["author"] or "",
-            "published": int(r["published"] or now_ts()),
-            "content_html": r["content_html"] or "",
-            "thumbnail": r["thumbnail"] or None,
-            "bookmarked": int(r["bookmarked"] or 0),
-            "read_at": r["read_at"],
-        } for r in rows])
+          ORDER BY e.published DESC LIMIT ?
+        """, (fid, limit)).fetchall()
+        statuses = _load_statuses(db, database_id, [r["id"] for r in rows])
+        return jsonify([_item_dict(r, statuses.get(r["id"])) for r in rows])
 
     q = request.args.get("q", "").strip()
     if q:
-        # Search across all stored posts regardless of feed, read state, or
-        # retention cutoff - the point is to find something you remember, not
-        # to browse the current reading queue.
+        # Search across all stored posts in this database regardless of read
+        # state or retention cutoff - the point is to find something you
+        # remember, not to browse the current reading queue.
         like = f"%{q}%"
-        rows = db.execute("""
-          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.bookmarked, e.read_at,
-                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
-          FROM entries e
-          JOIN feeds f ON f.id = e.feed_id
-          WHERE e.title LIKE ? OR e.author LIKE ? OR e.content_html LIKE ?
-          ORDER BY e.published DESC
-          LIMIT ?
-        """, (like, like, like, limit)).fetchall()
-        return jsonify([{
-            "id": r["id"],
-            "feed_title": r["feed_title"] or "(untitled feed)",
-            "month_count": int(r["month_count"] or 0),
-            "feed_author": r["feed_author"] or None,
-            "feed_image": r["feed_image"] or None,
-            "title": r["title"] or "(no title)",
-            "link": r["link"],
-            "author": r["author"] or "",
-            "published": int(r["published"] or now_ts()),
-            "content_html": r["content_html"] or "",
-            "thumbnail": r["thumbnail"] or None,
-            "bookmarked": int(r["bookmarked"] or 0),
-            "read_at": r["read_at"],
-        } for r in rows])
+        rows = db.execute(f"""
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.audio_url,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image, f.url AS feed_url
+          FROM entries e JOIN feeds f ON f.id = e.feed_id
+          WHERE e.feed_id IN ({feed_id_placeholders})
+            AND (e.title LIKE ? OR e.author LIKE ? OR e.content_html LIKE ?)
+          ORDER BY e.published DESC LIMIT ?
+        """, (*feed_ids, like, like, like, limit)).fetchall()
+        statuses = _load_statuses(db, database_id, [r["id"] for r in rows])
+        return jsonify([_item_dict(r, statuses.get(r["id"])) for r in rows])
 
     filter_mode = request.args.get("filter", "unread").lower()
     cutoff = cutoff_ts()
 
-    # Build WHERE clause based on filter mode
-    if filter_mode == "read":
-        where_clause = "e.read_at IS NOT NULL AND e.published >= ?"
-        params = (cutoff, limit)
-    elif filter_mode == "bookmarked":
-        where_clause = "e.bookmarked = 1"
-        params = (limit,)
-    elif filter_mode == "all":
-        where_clause = "e.published >= ?"
-        params = (cutoff, limit)
-    else:  # unread (default)
-        where_clause = "e.read_at IS NULL AND e.published >= ?"
-        params = (cutoff, limit)
-
-    query = f"""
-      SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.bookmarked, e.read_at,
-             f.title AS feed_title, f.month_count, f.feed_author, f.feed_image
-      FROM entries e
-      JOIN feeds f ON f.id = e.feed_id
-      WHERE {where_clause}
-    """
-
-    # Strip the LIMIT placeholder from params — we apply the limit after
-    # Python-side scoring so the cut happens on the ranked list, not before.
-    sql_params = params[:-1]
-    rows = db.execute(query, sql_params).fetchall()
+    if filter_mode == "bookmarked":
+        candidate_ids = [r["entry_id"] for r in db.execute(
+            "SELECT entry_id FROM entry_status WHERE database_id=? AND bookmarked=1", (database_id,)
+        ).fetchall()]
+        if not candidate_ids:
+            return jsonify([])
+        id_placeholders = ",".join("?" * len(candidate_ids))
+        rows = db.execute(f"""
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.audio_url,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image, f.url AS feed_url
+          FROM entries e JOIN feeds f ON f.id = e.feed_id
+          WHERE e.id IN ({id_placeholders})
+        """, candidate_ids).fetchall()
+        statuses = _load_statuses(db, database_id, [r["id"] for r in rows])
+    else:
+        rows = db.execute(f"""
+          SELECT e.id, e.title, e.link, e.author, e.published, e.content_html, e.thumbnail, e.audio_url,
+                 f.title AS feed_title, f.month_count, f.feed_author, f.feed_image, f.url AS feed_url
+          FROM entries e JOIN feeds f ON f.id = e.feed_id
+          WHERE e.feed_id IN ({feed_id_placeholders}) AND e.published >= ?
+        """, (*feed_ids, cutoff)).fetchall()
+        statuses = _load_statuses(db, database_id, [r["id"] for r in rows])
+        if filter_mode == "read":
+            rows = [r for r in rows if statuses.get(r["id"], (None, 0))[0] is not None]
+        elif filter_mode == "unread":
+            rows = [r for r in rows if statuses.get(r["id"], (None, 0))[0] is None]
+        # filter_mode == "all": no further filtering
 
     now = now_ts()
     items = []
     for r in rows:
         pub = int(r["published"] or now)
-        mc  = int(r["month_count"] or 0)
-        items.append({
-            "id": r["id"],
-            "feed_title": r["feed_title"] or "(untitled feed)",
-            "month_count": mc,
-            "feed_author": r["feed_author"] or None,
-            "feed_image": r["feed_image"] or None,
-            "title": r["title"] or "(no title)",
-            "link": r["link"],
-            "author": r["author"] or "",
-            "published": pub,
-            "content_html": r["content_html"] or "",
-            "thumbnail": r["thumbnail"] or None,
-            "bookmarked": int(r["bookmarked"] or 0),
-            "read_at": r["read_at"],
-            "_score": post_score(pub, mc, now),
-        })
+        mc = int(r["month_count"] or 0)
+        items.append({**_item_dict(r, statuses.get(r["id"])), "_score": post_score(pub, mc, now)})
 
     items.sort(key=lambda x: x["_score"], reverse=True)
-    items = items[:limit]
+    items = items[offset:offset + limit]
 
     # Remove internal scoring field before sending to client
     for item in items:
@@ -1303,33 +1482,98 @@ def api_items():
 @app.route("/api/mark_read", methods=["POST"])
 def api_mark_read():
     entry_id = int(request.json["id"])
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+    if not _entry_in_database(db, database["id"], entry_id):
+        return jsonify({"ok": False, "error": "Entry not in this database"}), 404
     with DB_WRITE_LOCK:
-        db = get_db()
-        db.execute("UPDATE entries SET read_at=? WHERE id=?", (now_ts(), entry_id))
+        db.execute(
+            "INSERT INTO entry_status (database_id, entry_id, read_at, bookmarked) VALUES (?, ?, ?, 0) "
+            "ON CONFLICT(database_id, entry_id) DO UPDATE SET read_at=excluded.read_at",
+            (database["id"], entry_id, now_ts()),
+        )
         db.commit()
     return jsonify({"ok": True})
 
 @app.route("/api/mark_all_read", methods=["POST"])
 def api_mark_all_read():
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+    database_id = database["id"]
     cutoff = cutoff_ts()
+    feed_ids = [r["feed_id"] for r in db.execute(
+        "SELECT feed_id FROM database_feeds WHERE database_id=?", (database_id,)
+    ).fetchall()]
+    if feed_ids:
+        placeholders = ",".join("?" * len(feed_ids))
+        candidate_ids = [r["id"] for r in db.execute(
+            f"SELECT id FROM entries WHERE feed_id IN ({placeholders}) AND published >= ?",
+            (*feed_ids, cutoff),
+        ).fetchall()]
+        if candidate_ids:
+            with DB_WRITE_LOCK:
+                now = now_ts()
+                # COALESCE keeps an already-read entry's original read_at,
+                # mirroring the old "WHERE read_at IS NULL" - only entries
+                # with no status row yet actually get stamped with `now`.
+                db.executemany(
+                    "INSERT INTO entry_status (database_id, entry_id, read_at, bookmarked) VALUES (?, ?, ?, 0) "
+                    "ON CONFLICT(database_id, entry_id) DO UPDATE SET "
+                    "read_at=COALESCE(entry_status.read_at, excluded.read_at)",
+                    [(database_id, eid, now) for eid in candidate_ids],
+                )
+                db.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/toggle_read", methods=["POST"])
+def api_toggle_read():
+    entry_id = int(request.json["id"])
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+    if not _entry_in_database(db, database["id"], entry_id):
+        return jsonify({"ok": False, "error": "Entry not in this database"}), 404
     with DB_WRITE_LOCK:
-        db = get_db()
+        row = db.execute(
+            "SELECT read_at FROM entry_status WHERE database_id=? AND entry_id=?",
+            (database["id"], entry_id),
+        ).fetchone()
+        cur = row["read_at"] if row else None
+        new = None if cur else now_ts()
         db.execute(
-            "UPDATE entries SET read_at=? WHERE read_at IS NULL AND published >= ?",
-            (now_ts(), cutoff)
+            "INSERT INTO entry_status (database_id, entry_id, read_at, bookmarked) VALUES (?, ?, ?, 0) "
+            "ON CONFLICT(database_id, entry_id) DO UPDATE SET read_at=excluded.read_at",
+            (database["id"], entry_id, new),
         )
         db.commit()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "read": new is not None, "read_at": new})
 
 @app.route("/api/toggle_bookmark", methods=["POST"])
 def api_toggle_bookmark():
     entry_id = int(request.json["id"])
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+    if not _entry_in_database(db, database["id"], entry_id):
+        return jsonify({"ok": False, "error": "Entry not in this database"}), 404
     with DB_WRITE_LOCK:
-        db = get_db()
-        row = db.execute("SELECT bookmarked FROM entries WHERE id=?", (entry_id,)).fetchone()
-        cur = int(row["bookmarked"] or 0)
+        row = db.execute(
+            "SELECT bookmarked FROM entry_status WHERE database_id=? AND entry_id=?",
+            (database["id"], entry_id),
+        ).fetchone()
+        cur = int(row["bookmarked"] or 0) if row else 0
         new = 0 if cur else 1
-        db.execute("UPDATE entries SET bookmarked=? WHERE id=?", (new, entry_id))
+        db.execute(
+            "INSERT INTO entry_status (database_id, entry_id, read_at, bookmarked) VALUES (?, ?, NULL, ?) "
+            "ON CONFLICT(database_id, entry_id) DO UPDATE SET bookmarked=excluded.bookmarked",
+            (database["id"], entry_id, new),
+        )
         db.commit()
     return jsonify({"ok": True, "bookmarked": new})
 
@@ -1337,10 +1581,8 @@ def api_toggle_bookmark():
 @app.route("/api/config")
 def api_config():
     return jsonify({
-        "db_path": ACTIVE_DB_PATH,
-        "configured_db_path": DB_PATH_ABS,
-        "db_exists": os.path.exists(ACTIVE_DB_PATH),
-        "configured_db_exists": os.path.exists(DB_PATH_ABS),
+        "db_path": GLOBAL_DB_PATH,
+        "db_exists": os.path.exists(GLOBAL_DB_PATH),
         "port": PORT,
         "retention_days": RETENTION_DAYS,
         "user_agent": USER_AGENT,
@@ -1348,34 +1590,55 @@ def api_config():
 
 @app.route("/api/db_list")
 def api_db_list():
-    dbs = _scan_databases()
-    cur = os.path.basename(ACTIVE_DB_PATH)
-    # Ensure current appears in list if it exists but isn't a *.db in directory (e.g., fallback)
-    if cur and cur.lower().endswith(".db") and cur not in dbs and os.path.exists(ACTIVE_DB_PATH):
-        dbs = [cur] + dbs
-    return jsonify({"ok": True, "db_dir": DB_DIR, "current": cur, "dbs": dbs})
+    db = get_db()
+    identity = g.get("identity")
+    dbs = []
+    current = None
+    if identity:
+        dbs = [r["slug"] for r in db.execute(
+            "SELECT slug FROM databases WHERE owner_kvstore_url=? AND owner_kvkey=? ORDER BY slug",
+            (identity.iss, identity.username),
+        ).fetchall()]
+        pref = db.execute(
+            "SELECT database_id FROM user_prefs WHERE owner_kvstore_url=? AND owner_kvkey=?",
+            (identity.iss, identity.username),
+        ).fetchone()
+        if pref:
+            d = db.execute("SELECT slug FROM databases WHERE id=?", (pref["database_id"],)).fetchone()
+            current = d["slug"] if d else None
+    return jsonify({"ok": True, "current": current, "dbs": dbs})
 
 @app.route("/api/db_select", methods=["POST"])
 def api_db_select():
+    identity = g.get("identity")
+    if not identity:
+        return jsonify({"ok": False, "error": "Login required"}), 401
     data = request.get_json(silent=True) or {}
     name = (data.get("db") or data.get("name") or "").strip()
     if not name:
         return jsonify({"ok": False, "error": "db required"}), 400
 
-    dbs = _scan_databases()
-    if name not in dbs:
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM databases WHERE owner_kvstore_url=? AND owner_kvkey=? AND slug=?",
+        (identity.iss, identity.username, name),
+    ).fetchone()
+    if not row:
         return jsonify({"ok": False, "error": f"Unknown db: {name}"}), 404
 
-    # Do not switch while an update job is running
-    job = get_job(_active_job_id) if _active_job_id else None
-    if job and job.get("state") in ("running", "starting"):
-        return jsonify({"ok": False, "error": "Cannot switch databases while an update is running."}), 409
-
+    # Unlike the old file-switching model, this only changes which database
+    # *this identity's* future requests default to -- it's per-caller state,
+    # not a process-global pointer, so it can't race the harvester or any
+    # other identity's requests. No "update running" guard needed.
     with DB_WRITE_LOCK:
-        _set_current_db_abs(os.path.join(DB_DIR, name))
-        init_db()
+        db.execute(
+            "INSERT INTO user_prefs (owner_kvstore_url, owner_kvkey, database_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(owner_kvstore_url, owner_kvkey) DO UPDATE SET database_id=excluded.database_id",
+            (identity.iss, identity.username, row["id"]),
+        )
+        db.commit()
 
-    return jsonify({"ok": True, "current": os.path.basename(ACTIVE_DB_PATH), "db_path": ACTIVE_DB_PATH})
+    return jsonify({"ok": True, "current": name, "db_path": GLOBAL_DB_PATH})
 
 
 def _require_no_running_update():
@@ -1391,31 +1654,56 @@ def api_feeds():
     limit = max(1, min(limit, 1000))
 
     db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug())
+    if err:
+        return err
+    feed_ids = [r["feed_id"] for r in db.execute(
+        "SELECT feed_id FROM database_feeds WHERE database_id=?", (database["id"],)
+    ).fetchall()]
+    if not feed_ids:
+        return jsonify({"ok": True, "feeds": []})
+    placeholders = ",".join("?" * len(feed_ids))
     if q:
         like = f"%{q}%"
         rows = db.execute(
-            "SELECT id, url, title FROM feeds WHERE url LIKE ? OR title LIKE ? ORDER BY COALESCE(title, url) LIMIT ?",
-            (like, like, limit),
+            f"SELECT id, url, title, feed_author, feed_image, description FROM feeds "
+            f"WHERE id IN ({placeholders}) AND (url LIKE ? OR title LIKE ?) "
+            f"ORDER BY COALESCE(title, url) LIMIT ?",
+            (*feed_ids, like, like, limit),
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT id, url, title FROM feeds ORDER BY COALESCE(title, url) LIMIT ?",
-            (limit,),
+            f"SELECT id, url, title, feed_author, feed_image, description FROM feeds "
+            f"WHERE id IN ({placeholders}) ORDER BY COALESCE(title, url) LIMIT ?",
+            (*feed_ids, limit),
         ).fetchall()
 
-    return jsonify({"ok": True, "feeds": [{"id": r["id"], "url": r["url"], "title": r["title"]} for r in rows]})
+    return jsonify({"ok": True, "feeds": [
+        {
+            "id": r["id"], "url": r["url"], "title": r["title"],
+            "author": r["feed_author"] or None, "image": r["feed_image"] or None,
+            "description": r["description"] or None,
+        } for r in rows
+    ]})
 
 
 @app.route("/api/feed/<int:feed_id>")
 def api_feed_get(feed_id: int):
     db = get_db()
-    r = db.execute("SELECT id, url, title, fail_count, error_msg, feed_author, feed_image FROM feeds WHERE id=?", (feed_id,)).fetchone()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug())
+    if err:
+        return err
+    if not db.execute(
+        "SELECT 1 FROM database_feeds WHERE database_id=? AND feed_id=?", (database["id"], feed_id)
+    ).fetchone():
+        return jsonify({"ok": False, "error": "Unknown feed"}), 404
+    r = db.execute("SELECT id, url, title, fail_count, error_msg, feed_author, feed_image, description FROM feeds WHERE id=?", (feed_id,)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "Unknown feed"}), 404
     return jsonify({"ok": True, "feed": {
         "id": r["id"], "url": r["url"], "title": r["title"],
         "fail_count": int(r["fail_count"] or 0), "error_msg": r["error_msg"],
-        "author": r["feed_author"], "image": r["feed_image"],
+        "author": r["feed_author"], "image": r["feed_image"], "description": r["description"],
     }})
 
 
@@ -1460,6 +1748,11 @@ def api_feed_create():
     if not input_url:
         return jsonify({"ok": False, "error": "url required"}), 400
 
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+
     try:
         feed_url, kind = discover_feed_url(input_url)
         feed_bytes, ct = _fetch_url_bytes(feed_url)
@@ -1471,29 +1764,32 @@ def api_feed_create():
         return jsonify({"ok": False, "error": str(e)}), 400
 
     with DB_WRITE_LOCK:
-        db = connect_db()
-        try:
-            existing = db.execute("SELECT id, url, title FROM feeds WHERE url=?", (feed_url,)).fetchone()
-            if existing:
-                feed_id = existing["id"]
-                # Update title if we learned it
-                if title and not existing["title"]:
-                    db.execute("UPDATE feeds SET title=? WHERE id=?", (title, feed_id))
-                    db.commit()
-                out_title = title or existing["title"]
-                out = {"id": feed_id, "url": existing["url"], "title": out_title}
-                return jsonify({"ok": True, "kind": kind, "feed": out, "existing": True})
-
+        existing = db.execute("SELECT id, title FROM feeds WHERE url=?", (feed_url,)).fetchone()
+        if existing:
+            feed_id = existing["id"]
+            if title and not existing["title"]:
+                db.execute("UPDATE feeds SET title=? WHERE id=?", (title, feed_id))
+            out_title = title or existing["title"]
+        else:
             cur = db.execute("INSERT INTO feeds(url,title,next_fetch) VALUES(?,?,?)", (feed_url, title, 0))
             feed_id = cur.lastrowid
-            db.commit()
+            out_title = title
 
+        already_in_db = db.execute(
+            "SELECT 1 FROM database_feeds WHERE database_id=? AND feed_id=?", (database["id"], feed_id)
+        ).fetchone() is not None
+        db.execute(
+            "INSERT OR IGNORE INTO database_feeds (database_id, feed_id, added_at) VALUES (?, ?, ?)",
+            (database["id"], feed_id, now_ts()),
+        )
+        db.commit()
+
+        if not already_in_db:
             # Fetch immediately so the right pane can refresh with new entries.
             _update_one_feed_now(feed_id)
-            out = {"id": feed_id, "url": feed_url, "title": title}
-            return jsonify({"ok": True, "kind": kind, "feed": out, "existing": False})
-        finally:
-            db.close()
+
+    out = {"id": feed_id, "url": feed_url, "title": out_title}
+    return jsonify({"ok": True, "kind": kind, "feed": out, "existing": already_in_db})
 
 
 @app.route("/api/feed_update", methods=["POST"])
@@ -1511,6 +1807,7 @@ def api_feed_update():
     # NULL, never a value someone deliberately typed and saved as empty vs blank.
     author = (data.get("author") or "").strip() or None
     image = (data.get("image") or "").strip() or None
+    description = (data.get("description") or "").strip() or None
     if not feed_id:
         return jsonify({"ok": False, "error": "id required"}), 400
     if not url:
@@ -1518,34 +1815,41 @@ def api_feed_update():
     if not re.match(r"^https?://", url, re.I):
         return jsonify({"ok": False, "error": "URL must start with http:// or https://"}), 400
 
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+    if not db.execute(
+        "SELECT 1 FROM database_feeds WHERE database_id=? AND feed_id=?", (database["id"], feed_id)
+    ).fetchone():
+        return jsonify({"ok": False, "error": "Unknown feed"}), 404
+
     with DB_WRITE_LOCK:
-        db = connect_db()
+        row = db.execute("SELECT id, url FROM feeds WHERE id=?", (feed_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Unknown feed"}), 404
+
         try:
-            row = db.execute("SELECT id, url, title FROM feeds WHERE id=?", (feed_id,)).fetchone()
-            if not row:
-                return jsonify({"ok": False, "error": "Unknown feed"}), 404
+            # NOTE: editing shared metadata (url/title/author/image) here
+            # affects every other database that also references this feed.
+            if url != row["url"]:
+                db.execute(
+                    "UPDATE feeds SET url=?, title=?, feed_author=?, feed_image=?, description=?, etag=NULL, last_modified=NULL, fail_count=0, next_fetch=0 WHERE id=?",
+                    (url, title, author, image, description, feed_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE feeds SET title=?, feed_author=?, feed_image=?, description=? WHERE id=?",
+                    (title, author, image, description, feed_id),
+                )
+            db.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({"ok": False, "error": "A feed with that URL already exists."}), 409
 
-            try:
-                if url != row["url"]:
-                    db.execute(
-                        "UPDATE feeds SET url=?, title=?, feed_author=?, feed_image=?, etag=NULL, last_modified=NULL, fail_count=0, next_fetch=0 WHERE id=?",
-                        (url, title, author, image, feed_id),
-                    )
-                else:
-                    db.execute(
-                        "UPDATE feeds SET title=?, feed_author=?, feed_image=? WHERE id=?",
-                        (title, author, image, feed_id),
-                    )
-                db.commit()
-            except sqlite3.IntegrityError:
-                return jsonify({"ok": False, "error": "A feed with that URL already exists."}), 409
-
-            # Refresh entries after update.
-            _update_one_feed_now(feed_id)
-            out = {"id": feed_id, "url": url, "title": title, "author": author, "image": image}
-            return jsonify({"ok": True, "feed": out})
-        finally:
-            db.close()
+        # Refresh entries after update.
+        _update_one_feed_now(feed_id)
+        out = {"id": feed_id, "url": url, "title": title, "author": author, "image": image}
+        return jsonify({"ok": True, "feed": out})
 
 
 @app.route("/api/feed_delete", methods=["POST"])
@@ -1559,26 +1863,54 @@ def api_feed_delete():
     if not feed_id:
         return jsonify({"ok": False, "error": "id required"}), 400
 
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+
     with DB_WRITE_LOCK:
-        db = connect_db()
-        try:
-            row = db.execute("SELECT id FROM feeds WHERE id=?", (feed_id,)).fetchone()
-            if not row:
-                return jsonify({"ok": False, "error": "Unknown feed"}), 404
+        if not db.execute(
+            "SELECT 1 FROM database_feeds WHERE database_id=? AND feed_id=?", (database["id"], feed_id)
+        ).fetchone():
+            return jsonify({"ok": False, "error": "Unknown feed"}), 404
+
+        # Membership-only delete: removing a feed from one database must
+        # never blow away the entries/history another database still shares
+        # it with. Only reclaim the feed globally once nothing lists it.
+        db.execute(
+            "DELETE FROM database_feeds WHERE database_id=? AND feed_id=?", (database["id"], feed_id)
+        )
+        db.execute(
+            "DELETE FROM entry_status WHERE database_id=? AND entry_id IN "
+            "(SELECT id FROM entries WHERE feed_id=?)",
+            (database["id"], feed_id),
+        )
+
+        still_referenced = db.execute(
+            "SELECT 1 FROM database_feeds WHERE feed_id=?", (feed_id,)
+        ).fetchone()
+        if not still_referenced:
+            db.execute(
+                "DELETE FROM entry_status WHERE entry_id IN (SELECT id FROM entries WHERE feed_id=?)",
+                (feed_id,),
+            )
             db.execute("DELETE FROM entries WHERE feed_id=?", (feed_id,))
             db.execute("DELETE FROM feeds WHERE id=?", (feed_id,))
-            db.commit()
-        finally:
-            db.close()
+        db.commit()
 
     return jsonify({"ok": True})
 
 @app.route("/api/feeds_errors")
 def api_feeds_errors():
     db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug())
+    if err:
+        return err
     rows = db.execute(
-        "SELECT id, url, title, fail_count, error_msg, last_fetch, last_ok FROM feeds"
-        " WHERE fail_count > 0 ORDER BY fail_count DESC, COALESCE(title, url)"
+        "SELECT f.id, f.url, f.title, f.fail_count, f.error_msg, f.last_fetch, f.last_ok "
+        "FROM feeds f JOIN database_feeds df ON df.feed_id = f.id "
+        "WHERE df.database_id=? AND f.fail_count > 0 ORDER BY f.fail_count DESC, COALESCE(f.title, f.url)",
+        (database["id"],),
     ).fetchall()
     return jsonify({"ok": True, "feeds": [{
         "id": r["id"], "url": r["url"], "title": r["title"],
@@ -1598,25 +1930,27 @@ def api_feed_retry():
     if not feed_id:
         return jsonify({"ok": False, "error": "id required"}), 400
 
-    with DB_WRITE_LOCK:
-        db = connect_db()
-        try:
-            row = db.execute("SELECT id FROM feeds WHERE id=?", (feed_id,)).fetchone()
-            if not row:
-                return jsonify({"ok": False, "error": "Unknown feed"}), 404
-            db.execute(
-                "UPDATE feeds SET fail_count=0, next_fetch=0, error_msg=NULL WHERE id=?",
-                (feed_id,)
-            )
-            db.commit()
-            _update_one_feed_now(feed_id)
+    db = get_db()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug(), for_write=True)
+    if err:
+        return err
+    if not db.execute(
+        "SELECT 1 FROM database_feeds WHERE database_id=? AND feed_id=?", (database["id"], feed_id)
+    ).fetchone():
+        return jsonify({"ok": False, "error": "Unknown feed"}), 404
 
-            r = db.execute(
-                "SELECT id, url, title, fail_count, error_msg, last_ok FROM feeds WHERE id=?",
-                (feed_id,)
-            ).fetchone()
-        finally:
-            db.close()
+    with DB_WRITE_LOCK:
+        db.execute(
+            "UPDATE feeds SET fail_count=0, next_fetch=0, error_msg=NULL WHERE id=?",
+            (feed_id,)
+        )
+        db.commit()
+        _update_one_feed_now(feed_id)
+
+        r = db.execute(
+            "SELECT id, url, title, fail_count, error_msg, last_ok FROM feeds WHERE id=?",
+            (feed_id,)
+        ).fetchone()
 
     return jsonify({"ok": True, "feed": {
         "id": r["id"], "url": r["url"], "title": r["title"],
@@ -1628,15 +1962,53 @@ def api_feed_retry():
 @app.route("/api/stats")
 def api_stats():
     db = get_db()
-    feeds = db.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
-    unread = db.execute("SELECT COUNT(*) AS c FROM entries WHERE read_at IS NULL AND published >= ?", (cutoff_ts(),)).fetchone()["c"]
-    bookmarked = db.execute("SELECT COUNT(*) AS c FROM entries WHERE bookmarked = 1").fetchone()["c"]
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug())
+    if err:
+        return err
+    database_id = database["id"]
+    feed_ids = [r["feed_id"] for r in db.execute(
+        "SELECT feed_id FROM database_feeds WHERE database_id=?", (database_id,)
+    ).fetchall()]
+    feeds = len(feed_ids)
+    bookmarked = db.execute(
+        "SELECT COUNT(*) AS c FROM entry_status WHERE database_id=? AND bookmarked=1", (database_id,)
+    ).fetchone()["c"]
+    # Podcast icon (CList's accountIcon()) should reflect the database as a whole,
+    # not flip on permanently the first time any single enclosure is seen -- so
+    # count audio vs. total entries across every feed in this database here.
+    audio_entries = total_entries = 0
+    if feed_ids:
+        placeholders = ",".join("?" * len(feed_ids))
+        row = db.execute(
+            f"SELECT COUNT(*) AS total, "
+            f"SUM(CASE WHEN audio_url IS NOT NULL AND audio_url != '' THEN 1 ELSE 0 END) AS audio "
+            f"FROM entries WHERE feed_id IN ({placeholders})",
+            feed_ids,
+        ).fetchone()
+        total_entries = row["total"] or 0
+        audio_entries = row["audio"] or 0
+    has_audio_majority = total_entries > 0 and audio_entries > total_entries / 2
+    unread = 0
+    if feed_ids:
+        placeholders = ",".join("?" * len(feed_ids))
+        candidate_ids = [r["id"] for r in db.execute(
+            f"SELECT id FROM entries WHERE feed_id IN ({placeholders}) AND published >= ?",
+            (*feed_ids, cutoff_ts()),
+        ).fetchall()]
+        if candidate_ids:
+            id_placeholders = ",".join("?" * len(candidate_ids))
+            read_count = db.execute(
+                f"SELECT COUNT(*) AS c FROM entry_status WHERE database_id=? AND entry_id IN ({id_placeholders}) AND read_at IS NOT NULL",
+                (database_id, *candidate_ids),
+            ).fetchone()["c"]
+            unread = len(candidate_ids) - read_count
     return jsonify({
         "feeds": feeds,
         "unread": unread,
         "bookmarked": bookmarked,
         "retention_days": RETENTION_DAYS,
         "scheduler_enabled": _scheduler_enabled,
+        "has_audio_majority": has_audio_majority,
     })
 
 @app.route("/api/update_start", methods=["POST"])
@@ -1673,7 +2045,14 @@ def api_scheduler():
 @app.route("/api/opml_export")
 def api_opml_export():
     db = get_db()
-    feeds = db.execute("SELECT url, title FROM feeds ORDER BY COALESCE(title, url)").fetchall()
+    database, err = resolve_database(db, g.get("identity"), slug=_requested_db_slug())
+    if err:
+        return err
+    feeds = db.execute(
+        "SELECT f.url, f.title FROM feeds f JOIN database_feeds df ON df.feed_id=f.id "
+        "WHERE df.database_id=? ORDER BY COALESCE(f.title, f.url)",
+        (database["id"],),
+    ).fetchall()
     data = _build_opml([{"url": r["url"], "title": r["title"]} for r in feeds])
     return Response(
         data,
@@ -1698,81 +2077,84 @@ def api_opml_import():
     if mode not in ("merge", "replace", "newdb"):
         return jsonify({"ok": False, "error": f"Unknown mode: {mode}"}), 400
 
+    identity = g.get("identity")
+    db = get_db()
     imported = 0
     skipped = 0
 
-    # Important: serialize DB writes
     with DB_WRITE_LOCK:
-        global DB_PATH, DB_PATH_ABS, ACTIVE_DB_PATH
-
         if mode == "newdb":
-            base_dir = DB_DIR
-            safe_name = _sanitize_db_name(new_db_name)
-            if not safe_name:
-                safe_name = "rss_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".db"
-            new_path = os.path.abspath(os.path.join(base_dir, safe_name))
-            parent = os.path.dirname(new_path)
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
-            if os.path.exists(new_path):
-                return jsonify({"ok": False, "error": f"DB already exists: {new_path}"}), 400
+            if not identity:
+                return jsonify({"ok": False, "error": "Login required"}), 401
+            slug = _sanitize_slug(new_db_name) or ("rss_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+            existing = db.execute(
+                "SELECT 1 FROM databases WHERE owner_kvstore_url=? AND owner_kvkey=? AND slug=?",
+                (identity.iss, identity.username, slug),
+            ).fetchone()
+            if existing:
+                return jsonify({"ok": False, "error": f"Database already exists: {slug}"}), 400
 
-            # Switch the app to this new DB
-            _set_current_db_abs(new_path)
-
-            # Create schema
-            init_db()
-
-            con = connect_db()
-            try:
-                con.execute("BEGIN")
-                for url, title in pairs:
-                    cur = con.execute(
-                        "INSERT OR IGNORE INTO feeds(url, title) VALUES(?, ?)",
-                        (url, title),
-                    )
-                    if cur.rowcount == 1:
-                        imported += 1
-                    else:
-                        skipped += 1
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
-                raise
-            finally:
-                con.close()
-
-            return jsonify({"ok": True, "mode": mode, "imported": imported, "skipped": skipped, "db_path": ACTIVE_DB_PATH})
-
-        # merge/replace operate on current DB
-        con = connect_db()
-        try:
-            con.execute("BEGIN")
-
-            if mode == "replace":
-                # Replace feed list: clear feeds + entries
-                con.execute("DELETE FROM entries")
-                con.execute("DELETE FROM feeds")
+            cur = db.execute(
+                "INSERT INTO databases (slug, title, owner_kvstore_url, owner_kvkey, created_at) VALUES (?, ?, ?, ?, ?)",
+                (slug, new_db_name or slug, identity.iss, identity.username, now_ts()),
+            )
+            database_id = cur.lastrowid
 
             for url, title in pairs:
-                cur = con.execute(
-                    "INSERT OR IGNORE INTO feeds(url, title) VALUES(?, ?)",
-                    (url, title),
+                feed_id = _ensure_global_feed(db, url, title)
+                cur2 = db.execute(
+                    "INSERT OR IGNORE INTO database_feeds (database_id, feed_id, added_at) VALUES (?, ?, ?)",
+                    (database_id, feed_id, now_ts()),
                 )
-                # rowcount is 1 for insert, 0 for ignored
-                if cur.rowcount == 1:
+                if cur2.rowcount == 1:
                     imported += 1
                 else:
                     skipped += 1
+            db.commit()
+            return jsonify({"ok": True, "mode": mode, "imported": imported, "skipped": skipped, "db": slug})
 
-            con.execute("COMMIT")
-        except Exception as e:
-            con.execute("ROLLBACK")
-            return jsonify({"ok": False, "error": str(e)}), 500
-        finally:
-            con.close()
+        # merge/replace operate on the resolved database
+        database, err = resolve_database(db, identity, slug=_requested_db_slug(), for_write=True)
+        if err:
+            return err
+        database_id = database["id"]
 
-    return jsonify({"ok": True, "mode": mode, "imported": imported, "skipped": skipped, "db_path": ACTIVE_DB_PATH})
+        if mode == "replace":
+            old_feed_ids = [r["feed_id"] for r in db.execute(
+                "SELECT feed_id FROM database_feeds WHERE database_id=?", (database_id,)
+            ).fetchall()]
+            db.execute(
+                "DELETE FROM entry_status WHERE database_id=? AND entry_id IN "
+                "(SELECT id FROM entries WHERE feed_id IN (SELECT feed_id FROM database_feeds WHERE database_id=?))",
+                (database_id, database_id),
+            )
+            db.execute("DELETE FROM database_feeds WHERE database_id=?", (database_id,))
+            for feed_id in old_feed_ids:
+                still_referenced = db.execute(
+                    "SELECT 1 FROM database_feeds WHERE feed_id=?", (feed_id,)
+                ).fetchone()
+                if not still_referenced:
+                    db.execute(
+                        "DELETE FROM entry_status WHERE entry_id IN (SELECT id FROM entries WHERE feed_id=?)",
+                        (feed_id,),
+                    )
+                    db.execute("DELETE FROM entries WHERE feed_id=?", (feed_id,))
+                    db.execute("DELETE FROM feeds WHERE id=?", (feed_id,))
+
+        for url, title in pairs:
+            feed_id = _ensure_global_feed(db, url, title)
+            cur = db.execute(
+                "INSERT OR IGNORE INTO database_feeds (database_id, feed_id, added_at) VALUES (?, ?, ?)",
+                (database_id, feed_id, now_ts()),
+            )
+            if cur.rowcount == 1:
+                imported += 1
+            else:
+                skipped += 1
+
+        db.commit()
+
+    return jsonify({"ok": True, "mode": mode, "imported": imported, "skipped": skipped})
 
 # Run schema creation + migrations, collections setup, and the background
 # scheduler at import time (covers gunicorn and direct invocation). This is
@@ -1796,7 +2178,7 @@ start_background_scheduler()
 def import_feeds_txt(path: str = "feeds.txt"):
     if not os.path.exists(path):
         return 0
-    con = connect_db()
+    con = connect_global()
     n = 0
     with open(path, "r", encoding="utf-8") as f:
         con.execute("BEGIN")
@@ -1868,10 +2250,15 @@ def acquire_single_instance_lock(lockfile: str = ".localrss.lock") -> object | N
 
 
 def import_default_opml_if_needed(path: str = "feeds.opml") -> int:
-    """If the feeds table is empty and an OPML file exists, import it (no duplicates)."""
+    """If the feeds table is empty and an OPML file exists, import it (no
+    duplicates). Desktop/local bootstrap only -- these feeds land in the
+    global table with no `database_feeds` membership yet, since there is no
+    identity to own a database at this point in startup. A first-run desktop
+    user still needs to create/select a personal database (e.g. via OPML
+    import mode=newdb through the UI) to see them."""
     if not os.path.exists(path):
         return 0
-    con = connect_db()
+    con = connect_global()
     try:
         cur = con.execute("SELECT COUNT(*) FROM feeds")
         count = int(cur.fetchone()[0] or 0)
@@ -1903,7 +2290,7 @@ if __name__ == "__main__":
     init_db()
 
     print(f"[INFO] LocalRSSReader v{APP_VERSION} starting…")
-    print(f"[INFO] Using database: {ACTIVE_DB_PATH}")
+    print(f"[INFO] Using database: {GLOBAL_DB_PATH}")
 
     try:
         imported = import_default_opml_if_needed("feeds.opml")

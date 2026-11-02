@@ -14,7 +14,7 @@ services:
     volumes:
       - ./data:/data
     environment:
-      - RSS_DB=/data/rss.db
+      - RSS_DB=/data/global.db
       - RSS_PORT=8787
       - ADMIN_USERNAMES=downes
     expose:
