@@ -20,6 +20,16 @@ only participates in **one** of CList's features across all six: the public, ano
 to this app at all — it always goes through opml2json (stateless fetch) + browser IndexedDB
 (storage), the same way in all six configurations.
 
+**Vendored copy for desktop executables.** Separately from the integration work below, CList's
+"CList + LocalRSS" desktop builds bundle a vendored snapshot of `app.py` + `feeds.opml` at
+`/srv/www/clist.mooc.ca/localrss_bundled/`, pinned to a commit SHA (see the header comment there)
+the same way `kvstore` pins `clist-server-admin`/`clist-kvstore-auth` — bump it when resyncing, so
+the executable gives a non-technical user a working local LocalRSS instance with no separate
+install. See
+`/srv/www/clist.mooc.ca/CLAUDE.md`'s "Desktop Launcher" section for how it's spawned. The vendored
+copy has one intentional deviation from this file (`fcntl` import moved/guarded for Windows
+compatibility) — **do not** apply that change here; this app always runs on Linux under gunicorn.
+
 **The goal:** make this app CList's personal-feed-harvesting backend too, local-first — run it on
 your own machine (ideal) when you can, fall back to a remote instance (`localrss.mooc.ca` or
 similar) when you can't. Not yet built. What's blocking it, in order:
