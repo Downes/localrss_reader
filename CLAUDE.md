@@ -447,3 +447,18 @@ the background harvester, and a progress poll can land on the wrong worker and a
 job. Admin-only impact, no data-corruption risk (SQLite's own locking + the existing 30s busy
 timeout still serialize writes) — real fix is moving job state out of in-memory globals into
 something cross-process-visible.
+
+## Harvest locking regression
+
+Use HARVEST_LOCK to serialize harvest cycles; DB_WRITE_LOCK protects only short
+SQLite writes. Never hold DB_WRITE_LOCK or an open write transaction while
+awaiting feed HTTP responses. Feed create/update/retry must release DB_WRITE_LOCK
+before invoking _update_one_feed_now. Keep per-feed commits and rollback isolation;
+retention must still protect bookmarked entries.
+
+Run `python -m unittest discover -s tests -p 'test_harvest_concurrency.py' -v`.
+These standard-library tests isolate real functions with temporary SQLite and
+mocked fetches, without starting Flask or accessing deployed/user databases.
+Desktop requirements must include requirements.txt so shared backend dependencies
+are collected as well as Flask/aiohttp/feedparser. Reconcile CList's vendored
+snapshot separately, preserving its intentional Windows fcntl guards.

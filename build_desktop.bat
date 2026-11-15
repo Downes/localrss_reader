@@ -18,12 +18,13 @@ if errorlevel 1 (
 echo Installing/updating dependencies...
 python -m pip install --upgrade pip
 python -m pip install -r requirements-desktop.txt
+if errorlevel 1 exit /b 1
 
 echo.
 echo Building executable with PyInstaller...
-pyinstaller localrss.spec --clean
+python -m PyInstaller localrss.spec --clean
 
-if errorlevel 0 (
+if not errorlevel 1 (
     echo.
     echo ============================================
     echo Build successful!

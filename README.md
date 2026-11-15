@@ -96,3 +96,16 @@ v0.4.8 robustness:
 - Creates missing DB directory for RSS_DB paths.
 - If configured DB can't be opened, falls back to local rss.db instead of crashing.
 - UI shows Active vs Configured DB path.
+
+## Harvest responsiveness regression
+
+Harvest scheduling uses a separate lock from database writes. Network requests
+run outside the database write lock; completed feeds commit separately so read
+and bookmark changes can complete while another feed is slow. A failed feed rolls
+back its own changes, preserving earlier commits. Restart deployed workers after
+updating. No database migration is required.
+
+Run `python -m unittest discover -s tests -p 'test_harvest_concurrency.py' -v`.
+The tests use real backend functions, temporary SQLite databases and mocked network
+fetching, with no Flask startup or live data. Desktop build requirements include
+all backend dependencies through `requirements.txt`.

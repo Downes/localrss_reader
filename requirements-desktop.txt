@@ -1,10 +1,8 @@
 # Desktop application requirements
 # Includes all Flask dependencies plus system tray/packaging tools
 
-# Web framework (from requirements.txt)
-flask
-aiohttp
-feedparser
+# Backend dependencies, including shared admin and authentication packages.
+-r requirements.txt
 
 # Desktop/System Tray
 pystray>=0.19.0

@@ -1,16 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+backend_datas, backend_binaries, backend_imports = [], [], []
+for package in ("flask", "aiohttp", "feedparser", "clist_server_admin", "clist_kvstore_auth"):
+    data, binaries, imports = collect_all(package)
+    backend_datas.extend(data)
+    backend_binaries.extend(binaries)
+    backend_imports.extend(imports)
+
 block_cipher = None
 
 a = Analysis(
     ['tray_app.py'],
     pathex=[],
-    binaries=[],
+    binaries=backend_binaries,
     datas=[
         ('app.py', '.'),
         ('static', 'static'),
         ('feeds.opml', '.'),
-    ],
+    ] + backend_datas,
     hiddenimports=[
         'flask',
         'aiohttp',
@@ -18,7 +27,7 @@ a = Analysis(
         'pystray',
         'PIL',
         'sqlite3',
-    ],
+    ] + backend_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
