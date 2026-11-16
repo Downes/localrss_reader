@@ -1,6 +1,5 @@
 import asyncio
 import calendar
-import fcntl
 import hashlib
 import re
 import os
@@ -958,9 +957,18 @@ _scheduler_leader_fh = None
 def _acquire_scheduler_leadership() -> bool:
     global _scheduler_leader_fh
     lock_path = os.path.join(os.path.dirname(GLOBAL_DB_PATH), ".harvester.lock")
-    fh = open(lock_path, "w")
+    fh = open(lock_path, "a+b")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.name == "nt":
+            import msvcrt
+            if os.path.getsize(lock_path) == 0:
+                fh.write(b"0")
+                fh.flush()
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()
         return False
@@ -968,6 +976,8 @@ def _acquire_scheduler_leadership() -> bool:
     return True
 
 def start_background_scheduler():
+    if os.environ.get("RSS_DISABLE_SCHEDULER") == "1":
+        return
     if not _acquire_scheduler_leadership():
         print("[INFO] Another worker already owns the harvester; not starting it here.", file=sys.stderr)
         return

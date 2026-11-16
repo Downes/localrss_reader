@@ -1,14 +1,15 @@
 # LocalRSSReader v0.4.9
 
-## 📦 Windows Desktop App Available!
+## Standalone desktop downloads
 
-A standalone desktop application is now available with:
-- System tray integration
-- Automatic database sync with VPS
-- No Python installation required for end users
-- One-click build process
+GitHub Actions builds Windows, Linux, Intel Mac and Apple Silicon downloads.
+Download your archive from [Releases](https://github.com/Downes/localrss_reader/releases/latest),
+extract it and run LocalRSS. It opens in your browser: no Python, SSH keys or VPS
+is needed. Sign in with the existing kvstore login to manage feeds.
 
-See [QUICKSTART_WINDOWS.md](QUICKSTART_WINDOWS.md) for building and [README_DESKTOP.md](README_DESKTOP.md) for full documentation.
+See [Windows quick start](QUICKSTART_WINDOWS.md) or the
+[desktop guide](README_DESKTOP.md). New downloads appear once the workflow is
+pushed and all platform builds succeed.
 
 ---
 

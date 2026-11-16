@@ -28,7 +28,7 @@ the executable gives a non-technical user a working local LocalRSS instance with
 install. See
 `/srv/www/clist.mooc.ca/CLAUDE.md`'s "Desktop Launcher" section for how it's spawned. The vendored
 copy has one intentional deviation from this file (`fcntl` import moved/guarded for Windows
-compatibility) — **do not** apply that change here; this app always runs on Linux under gunicorn.
+compatibility) — the standalone desktop release now also guards fcntl locally and uses msvcrt on Windows; preserve Linux gunicorn leader election.
 
 **The goal:** make this app CList's personal-feed-harvesting backend too, local-first — run it on
 your own machine (ideal) when you can, fall back to a remote instance (`localrss.mooc.ca` or
@@ -462,3 +462,20 @@ mocked fetches, without starting Flask or accessing deployed/user databases.
 Desktop requirements must include requirements.txt so shared backend dependencies
 are collected as well as Flask/aiohttp/feedparser. Reconcile CList's vendored
 snapshot separately, preserving its intentional Windows fcntl guards.
+
+## Standalone executable releases
+
+`desktop_launcher.py` is the local-only release entry point; `tray_app.py` remains
+the separate legacy SSH sync tool. Never introduce VPS defaults, automatic database
+copies or runtime pip installs into the standalone launcher. Preserve authentication
+and bind only to loopback. Data belongs in the user's platform data directory,
+not PyInstaller's extraction folder or the executable's working directory.
+
+`build_standalone.py` collects dynamic backend imports/resources and runs the
+finished executable's `--self-test`. That test must use a temporary DB, disable
+harvesting/browser launch, and check HTTP/assets/authentication and lock isolation.
+Run `python -m unittest discover -s tests -p 'test_*.py' -v` plus the real smoke
+check. `.github/workflows/desktop.yml` builds Windows/Linux/macOS Intel and ARM;
+only publish after all variants pass. Do not call local Windows evidence proof
+that the other operating systems passed. Legacy SSH instructions are archived in
+LEGACY_DESKTOP_SYNC.md; the quick starts describe released downloads.

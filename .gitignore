@@ -48,3 +48,6 @@ build/
 # PyInstaller
 *.spec.backup
 *.manifest
+
+# Generated standalone release archives
+release/
