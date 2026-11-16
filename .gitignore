@@ -51,3 +51,6 @@ build/
 
 # Generated standalone release archives
 release/
+
+# Isolated CI/developer build environment
+.venv/

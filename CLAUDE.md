@@ -479,3 +479,10 @@ check. `.github/workflows/desktop.yml` builds Windows/Linux/macOS Intel and ARM;
 only publish after all variants pass. Do not call local Windows evidence proof
 that the other operating systems passed. Legacy SSH instructions are archived in
 LEGACY_DESKTOP_SYNC.md; the quick starts describe released downloads.
+
+Desktop builds must run in the isolated `.venv` created by the workflow, with a
+binary cryptography wheel (`--only-binary=cryptography`, no cache). Intel Mac
+packaging previously included cryptography dynamically linked to Homebrew OpenSSL
+and loaded an incompatible bundled libssl. Preserve environment/OpenSSL diagnostics
+and the packaged startup test; do not weaken TLS, strip crypto dependencies, or
+skip the smoke test to make a release pass.

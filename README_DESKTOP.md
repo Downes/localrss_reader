@@ -36,10 +36,17 @@ or bundled subscription import is performed.
 
 ## Build from source (developers)
 
-Use Python 3.12, from the repository root:
+Use Python 3.12 in a fresh virtual environment, from the repository root:
 
 ```text
-python -m pip install -r requirements-standalone.txt
+python -m venv .venv
+```
+
+Activate it with `.venv\Scripts\Activate.ps1` in PowerShell or
+`source .venv/bin/activate` in a macOS/Linux shell. Then run:
+
+```text
+python -m pip install --no-cache-dir --only-binary=cryptography -r requirements-standalone.txt
 python -m unittest discover -s tests -p 'test_*.py' -v
 python desktop_launcher.py --self-test
 python build_standalone.py
@@ -65,3 +72,11 @@ Local verification (2026-11-15): seven Python tests passed, and a Windows one-fi
 executable passed the real temporary-DB/HTTP/authentication/locking smoke check.
 Workflow YAML parsed with all four variants. macOS/Linux builds and release
 publication await execution in GitHub Actions; no live-account writes were tested.
+
+The release workflow builds in a fresh virtual environment and installs a binary
+cryptography wheel, rather than reusing runner-installed packages. The failed
+Intel Mac startup log showed cryptography dynamically linked to Homebrew OpenSSL
+while the executable bundled an incompatible libssl. Official cryptography wheels
+include their OpenSSL statically, avoiding that dependency collision. The packaged
+startup/authentication smoke check remains mandatory; the Mac fix still needs its
+own GitHub Actions run to confirm it.

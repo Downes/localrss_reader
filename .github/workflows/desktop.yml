@@ -34,8 +34,16 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Create isolated build environment
+        run: |
+          python -m venv .venv
+          python -c "import os; from pathlib import Path; scripts = Path('.venv').resolve() / ('Scripts' if os.name == 'nt' else 'bin'); handle = Path(os.environ['GITHUB_PATH']).open('a', encoding='utf-8'); handle.write(str(scripts) + '\n'); handle.close()"
       - name: Install build dependencies
-        run: python -m pip install -r requirements-standalone.txt
+        run: python -m pip install --no-cache-dir --only-binary=cryptography -r requirements-standalone.txt
+      - name: Check isolated Python and OpenSSL versions
+        run: |
+          python -c "import sys; assert sys.prefix != sys.base_prefix, 'Build must use the isolated virtual environment'; print('Python:', sys.executable)"
+          python -c "import ssl; from cryptography.hazmat.backends.openssl.backend import backend; print('Python OpenSSL:', ssl.OPENSSL_VERSION); print('Cryptography OpenSSL:', backend.openssl_version_text())"
       - name: Run backend and desktop tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check source startup without user data or network harvesting
